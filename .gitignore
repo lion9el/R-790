@@ -1,0 +1,36 @@
+# --- Base de données locale ---
+# Chaque développeur a sa propre base de test ; ne jamais versionner de données.
+*.db
+*.db-journal
+
+# --- Extension C compilée ---
+# Le .so est régénéré par `python3 setup.py build_ext --inplace` (voir run.sh).
+# Le versionner créerait des conflits binaires illisibles entre machines/OS différents.
+c_ext/build/
+c_ext/*.so
+c_ext/*.pyd
+c_ext/*.egg-info/
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- Environnement / secrets ---
+# Le fichier .env contiendra la vraie valeur de SOCIALNET_SECRET en production ;
+# ne jamais le committer (voir .env.example pour le modèle).
+.env
+
+# --- Éditeurs / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Logs ---
+*.log

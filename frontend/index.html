@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>SOCIALNET // terminal</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --amber: #ffb000;
+    --amber-dim: #a86e00;
+    --amber-faint: #5c3d00;
+    --bg: #0d0900;
+    --bg-panel: #161005;
+    --red: #ff5f4d;
+    --font: "JetBrains Mono", "IBM Plex Mono", "Courier New", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; background: var(--bg); color: var(--amber);
+    font-family: var(--font); font-size: 15px; overflow: hidden;
+  }
+  #crt {
+    height: 100%; display: flex; flex-direction: column;
+    position: relative;
+  }
+  #crt::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 5;
+    background: repeating-linear-gradient(
+      to bottom, rgba(0,0,0,0) 0px, rgba(0,0,0,0) 1px,
+      rgba(0,0,0,0.18) 2px, rgba(0,0,0,0.18) 3px
+    );
+    mix-blend-mode: multiply;
+  }
+  #crt::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 6;
+    background: radial-gradient(ellipse at center, rgba(255,176,0,0.05) 0%, rgba(0,0,0,0.35) 100%);
+  }
+  header {
+    padding: 10px 18px; border-bottom: 1px solid var(--amber-faint);
+    display: flex; justify-content: space-between; align-items: baseline;
+    text-shadow: 0 0 6px rgba(255,176,0,0.5);
+  }
+  header .brand { font-weight: 700; letter-spacing: 3px; }
+  header .who { color: var(--amber-dim); font-size: 13px; }
+  #screen {
+    flex: 1; overflow-y: auto; padding: 14px 18px;
+    text-shadow: 0 0 4px rgba(255,176,0,0.35);
+  }
+  #screen::-webkit-scrollbar { width: 10px; }
+  #screen::-webkit-scrollbar-thumb { background: var(--amber-faint); }
+  .line { white-space: pre-wrap; word-break: break-word; line-height: 1.5; margin: 2px 0; }
+  .line.cmd { color: #fff; opacity: 0.85; }
+  .line.cmd::before { content: "» "; color: var(--amber-dim); }
+  .line.err { color: var(--red); }
+  .line.dim { color: var(--amber-dim); }
+  .post {
+    border-left: 2px solid var(--amber-faint); padding: 4px 10px; margin: 8px 0;
+  }
+  .post .meta { color: var(--amber-dim); font-size: 12px; }
+  .post .content { color: var(--amber); }
+  #inputRow {
+    display: flex; align-items: center; padding: 10px 18px;
+    border-top: 1px solid var(--amber-faint); background: var(--bg-panel);
+  }
+  #prompt { color: var(--amber); margin-right: 6px; white-space: nowrap; }
+  #cmdInput {
+    flex: 1; background: transparent; border: none; outline: none;
+    color: #fff; font-family: var(--font); font-size: 15px;
+    caret-color: var(--amber);
+  }
+  #cmdInput::placeholder { color: var(--amber-faint); }
+  .blink { animation: blink 1s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+</style>
+</head>
+<body>
+<div id="crt">
+  <header>
+    <span class="brand">SOCIALNET_</span>
+    <span class="who" id="whoami">non connecté — tape <b>help</b></span>
+  </header>
+  <div id="screen"></div>
+  <div id="inputRow">
+    <span id="prompt">guest&gt;</span>
+    <input id="cmdInput" autocomplete="off" spellcheck="false" placeholder="tape une commande… (help pour la liste)" autofocus>
+  </div>
+</div>
+
+<script>
+const API = "";
+let token = localStorage.getItem("sn_token") || null;
+let username = localStorage.getItem("sn_username") || null;
+let history = [];
+let historyIdx = -1;
+
+const screen = document.getElementById("screen");
+const input = document.getElementById("cmdInput");
+const prompt = document.getElementById("prompt");
+const whoami = document.getElementById("whoami");
+
+function print(text, cls) {
+  const div = document.createElement("div");
+  div.className = "line" + (cls ? " " + cls : "");
+  div.textContent = text;
+  screen.appendChild(div);
+  screen.scrollTop = screen.scrollHeight;
+}
+
+function printHTML(html) {
+  const div = document.createElement("div");
+  div.innerHTML = html;
+  screen.appendChild(div);
+  screen.scrollTop = screen.scrollHeight;
+}
+
+function updateHeader() {
+  prompt.textContent = (username || "guest") + ">";
+  whoami.textContent = username ? ("connecté en tant que " + username) : "non connecté — tape help";
+}
+updateHeader();
+
+function banner() {
+  print("═══════════════════════════════════════════════");
+  print("  SOCIALNET v1.0 — interface terminal");
+  print("  backend: FastAPI (Python) + moteur de recherche en C");
+  print("═══════════════════════════════════════════════");
+  print("Tape 'help' pour voir les commandes disponibles.", "dim");
+  print("");
+}
+banner();
+
+async function api(method, path, body, auth = true) {
+  const headers = { "Content-Type": "application/json" };
+  if (auth && token) headers["Authorization"] = "Bearer " + token;
+  const res = await fetch(API + path, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let data = null;
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok) {
+    const msg = (data && data.detail) ? data.detail : ("erreur HTTP " + res.status);
+    throw new Error(msg);
+  }
+  return data;
+}
+
+function fmtPost(p) {
+  const liked = p.liked_by_me ? "♥" : "♡";
+  return `<div class="post">` +
+    `<div class="meta">#${p.id} @${escapeHtml(p.author)} — ${fmtDate(p.created_at)}${p.score !== undefined ? " (score " + p.score + ")" : ""}</div>` +
+    `<div class="content">${escapeHtml(p.content)}</div>` +
+    `<div class="meta">${liked} ${p.likes} likes · 💬 ${p.comments} commentaires</div>` +
+    `</div>`;
+}
+
+function fmtDate(iso) {
+  try {
+    const d = new Date(iso + "Z");
+    return d.toLocaleString();
+  } catch (e) { return iso; }
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function requireAuth() {
+  if (!token) { print("Tu dois être connecté. Utilise: login <user> <mdp>", "err"); return false; }
+  return true;
+}
+
+const COMMANDS = {
+  help() {
+    print("Commandes disponibles :", "dim");
+    print("  register <user> <mdp>        créer un compte");
+    print("  login <user> <mdp>           se connecter");
+    print("  logout                       se déconnecter");
+    print("  whoami                       afficher l'utilisateur courant");
+    print("  post <texte>                 publier un post");
+    print("  feed [n]                     afficher le fil d'actualité");
+    print("  like <id>                    liker un post");
+    print("  unlike <id>                  retirer son like");
+    print("  comment <id> <texte>         commenter un post");
+    print("  comments <id>                voir les commentaires d'un post");
+    print("  follow <user>                suivre un utilisateur");
+    print("  unfollow <user>              ne plus suivre");
+    print("  profile <user>               voir un profil");
+    print("  msg <user> <texte>           envoyer un message privé");
+    print("  conv <user>                  voir une conversation");
+    print("  inbox                        liste des conversations");
+    print("  search <mots>                rechercher des posts (moteur C)");
+    print("  clear                        vider l'écran");
+  },
+
+  async register(args) {
+    const [user, pass] = args;
+    if (!user || !pass) return print("usage: register <user> <mdp>", "err");
+    const data = await api("POST", "/api/register", { username: user, password: pass }, false);
+    token = data.token; username = data.username;
+    localStorage.setItem("sn_token", token); localStorage.setItem("sn_username", username);
+    updateHeader();
+    print(`Compte créé. Bienvenue @${username} !`);
+  },
+
+  async login(args) {
+    const [user, pass] = args;
+    if (!user || !pass) return print("usage: login <user> <mdp>", "err");
+    const data = await api("POST", "/api/login", { username: user, password: pass }, false);
+    token = data.token; username = data.username;
+    localStorage.setItem("sn_token", token); localStorage.setItem("sn_username", username);
+    updateHeader();
+    print(`Connecté en tant que @${username}.`);
+  },
+
+  logout() {
+    token = null; username = null;
+    localStorage.removeItem("sn_token"); localStorage.removeItem("sn_username");
+    updateHeader();
+    print("Déconnecté.");
+  },
+
+  whoami() {
+    print(username ? `@${username}` : "non connecté");
+  },
+
+  async post(args) {
+    if (!requireAuth()) return;
+    const text = args.join(" ");
+    if (!text) return print("usage: post <texte>", "err");
+    const p = await api("POST", "/api/posts", { content: text });
+    print("Publié :");
+    printHTML(fmtPost(p));
+  },
+
+  async feed(args) {
+    if (!requireAuth()) return;
+    const limit = parseInt(args[0]) || 30;
+    const posts = await api("GET", `/api/feed?limit=${limit}`);
+    if (posts.length === 0) return print("Fil vide. Suis des gens ou publie un post !", "dim");
+    posts.forEach(p => printHTML(fmtPost(p)));
+  },
+
+  async like(args) {
+    if (!requireAuth()) return;
+    const id = args[0];
+    if (!id) return print("usage: like <id>", "err");
+    await api("POST", `/api/posts/${id}/like`);
+    print(`Post #${id} liké.`);
+  },
+
+  async unlike(args) {
+    if (!requireAuth()) return;
+    const id = args[0];
+    if (!id) return print("usage: unlike <id>", "err");
+    await api("DELETE", `/api/posts/${id}/like`);
+    print(`Like retiré du post #${id}.`);
+  },
+
+  async comment(args) {
+    if (!requireAuth()) return;
+    const id = args[0];
+    const text = args.slice(1).join(" ");
+    if (!id || !text) return print("usage: comment <id> <texte>", "err");
+    await api("POST", `/api/posts/${id}/comments`, { content: text });
+    print("Commentaire ajouté.");
+  },
+
+  async comments(args) {
+    if (!requireAuth()) return;
+    const id = args[0];
+    if (!id) return print("usage: comments <id>", "err");
+    const list = await api("GET", `/api/posts/${id}/comments`);
+    if (list.length === 0) return print("Aucun commentaire.", "dim");
+    list.forEach(c => print(`  @${c.author}: ${c.content}`));
+  },
+
+  async follow(args) {
+    if (!requireAuth()) return;
+    const user = args[0];
+    if (!user) return print("usage: follow <user>", "err");
+    await api("POST", `/api/follow/${user}`);
+    print(`Tu suis maintenant @${user}.`);
+  },
+
+  async unfollow(args) {
+    if (!requireAuth()) return;
+    const user = args[0];
+    if (!user) return print("usage: unfollow <user>", "err");
+    await api("DELETE", `/api/follow/${user}`);
+    print(`Tu ne suis plus @${user}.`);
+  },
+
+  async profile(args) {
+    if (!requireAuth()) return;
+    const user = args[0];
+    if (!user) return print("usage: profile <user>", "err");
+    const p = await api("GET", `/api/users/${user}`);
+    print(`@${p.username}`);
+    print(`  bio: ${p.bio || "(vide)"}`);
+    print(`  ${p.posts} posts · ${p.followers} followers · ${p.following} suivis`);
+  },
+
+  async msg(args) {
+    if (!requireAuth()) return;
+    const user = args[0];
+    const text = args.slice(1).join(" ");
+    if (!user || !text) return print("usage: msg <user> <texte>", "err");
+    await api("POST", "/api/messages", { to: user, content: text });
+    print(`Message envoyé à @${user}.`);
+  },
+
+  async conv(args) {
+    if (!requireAuth()) return;
+    const user = args[0];
+    if (!user) return print("usage: conv <user>", "err");
+    const msgs = await api("GET", `/api/messages/${user}`);
+    if (msgs.length === 0) return print("Aucun message.", "dim");
+    msgs.forEach(m => print(`  [${fmtDate(m.created_at)}] @${m.from}: ${m.content}`));
+  },
+
+  async inbox() {
+    if (!requireAuth()) return;
+    const list = await api("GET", "/api/inbox");
+    if (list.length === 0) return print("Boîte de réception vide.", "dim");
+    list.forEach(c => print(`  @${c.with} ${c.unread > 0 ? "(" + c.unread + " non lus)" : ""}`));
+  },
+
+  async search(args) {
+    if (!requireAuth()) return;
+    const q = args.join(" ");
+    if (!q) return print("usage: search <mots>", "err");
+    const results = await api("GET", `/api/search?q=${encodeURIComponent(q)}`);
+    if (results.length === 0) return print("Aucun résultat.", "dim");
+    results.forEach(p => printHTML(fmtPost(p)));
+  },
+
+  clear() {
+    screen.innerHTML = "";
+  },
+};
+
+async function runCommand(raw) {
+  print(raw, "cmd");
+  const parts = raw.trim().split(/\s+/);
+  const cmdName = parts[0];
+  const args = parts.slice(1);
+  if (!cmdName) return;
+  const fn = COMMANDS[cmdName];
+  if (!fn) {
+    print(`Commande inconnue: ${cmdName}. Tape 'help'.`, "err");
+    return;
+  }
+  try {
+    await fn(args);
+  } catch (e) {
+    print("Erreur: " + e.message, "err");
+  }
+  print("");
+}
+
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    const val = input.value;
+    if (val.trim()) {
+      history.push(val);
+      historyIdx = history.length;
+    }
+    input.value = "";
+    runCommand(val);
+  } else if (e.key === "ArrowUp") {
+    if (historyIdx > 0) { historyIdx--; input.value = history[historyIdx]; }
+    e.preventDefault();
+  } else if (e.key === "ArrowDown") {
+    if (historyIdx < history.length - 1) { historyIdx++; input.value = history[historyIdx]; }
+    else { historyIdx = history.length; input.value = ""; }
+    e.preventDefault();
+  }
+});
+
+document.addEventListener("click", () => input.focus());
+</script>
+</body>
+</html>
