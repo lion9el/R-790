@@ -4,7 +4,14 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     salt TEXT NOT NULL,
     bio TEXT DEFAULT '',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- Horodatage Unix en MILLISECONDES (pas en secondes, pour éviter des
+    -- collisions entre deux jetons émis pendant la même seconde) : tout
+    -- jeton émis avant cette date (comparé à son claim JWT "iat_ms") est
+    -- considéré révoqué ("déconnexion de tous les appareils"). NULL = pas
+    -- de révocation globale en cours. Ajoutée après la v1.0 pour les bases
+    -- déjà créées ; voir database.py::_apply_migrations.
+    tokens_valid_after INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS posts (
@@ -94,6 +101,26 @@ CREATE TABLE IF NOT EXISTS post_hashtags (
 );
 
 CREATE INDEX IF NOT EXISTS idx_post_hashtags_tag ON post_hashtags(hashtag);
+
+-- Jetons révoqués individuellement (déconnexion d'UNE session précise, via
+-- POST /api/logout — à distinguer de users.tokens_valid_after, qui révoque
+-- TOUTES les sessions d'un coup). Une ligne par jeton révoqué, jusqu'à SA
+-- date d'expiration naturelle : au-delà, le jeton serait de toute façon
+-- refusé par la vérification normale de signature/expiration, la ligne
+-- devient inutile (purgée au fil de l'eau, voir app.py::logout).
+CREATE TABLE IF NOT EXISTS revoked_tokens (
+    jti TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    -- Date d'expiration NATURELLE du jeton (pas la date de révocation) :
+    -- format ISO texte, cohérent avec les autres colonnes *_at de ce schéma
+    -- (contrairement à tokens_valid_after ci-dessus, comparée à "iat" et
+    -- donc en entier Unix — les deux mécanismes sont indépendants).
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON revoked_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS idx_posts_user ON posts(user_id);
 CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id);
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(sender_id, receiver_id);

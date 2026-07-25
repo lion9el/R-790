@@ -39,6 +39,18 @@ def _apply_migrations(conn):
         conn.execute("ALTER TABLE posts ADD COLUMN image_path TEXT")
         conn.commit()
 
+    users_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
+    if "tokens_valid_after" not in users_columns:
+        # Horodatage Unix en MILLISECONDES (entier, PAS le format ISO texte
+        # utilisé par les autres colonnes *_at de ce schéma) : comparé au
+        # claim JWT "iat_ms" (résolution milliseconde, pas "iat" qui est en
+        # secondes — évite les collisions entre deux jetons émis pendant la
+        # même seconde). NULL = aucune révocation globale en cours pour cet
+        # utilisateur (comportement normal). Voir app.py::logout_all et
+        # get_current_user pour son utilisation.
+        conn.execute("ALTER TABLE users ADD COLUMN tokens_valid_after INTEGER")
+        conn.commit()
+
 
 @contextmanager
 def get_conn():

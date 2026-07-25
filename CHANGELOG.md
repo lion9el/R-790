@@ -5,6 +5,45 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
+## [Non publié] — révocation de jeton
+
+Dernier point non traité de l'audit sécurité (v1.4) : un jeton JWT restait
+valable jusqu'à son expiration naturelle (7 jours) même après un "logout"
+côté client, qui ne faisait qu'oublier le jeton dans le navigateur — un
+jeton volé (poste partagé, XSS, etc.) restait pleinement utilisable.
+
+### Ajouté
+- `POST /api/logout` : révoque le jeton actuellement utilisé (une session/
+  un appareil), via une nouvelle table `revoked_tokens` (le jeton y reste
+  jusqu'à sa date d'expiration naturelle, purgé automatiquement ensuite).
+- `POST /api/logout/all` : révoque tous les jetons émis jusqu'ici pour ce
+  compte (tous les appareils), y compris celui qui sert à l'appel — utile
+  si on soupçonne qu'un jeton a fuité sans savoir lequel précisément.
+  Implémenté par une colonne `users.tokens_valid_after` plutôt qu'une liste
+  de jetons (impossible à énumérer, seuls les jetons révoqués individuellement
+  sont jamais stockés).
+- Chaque JWT porte désormais un `jti` (identifiant de session) et un `iat`/
+  `iat_ms` (émission), nécessaires à ces deux mécanismes.
+- Commandes terminal `logout` (désormais réellement côté serveur, plus
+  seulement local) et `logout-all`.
+- 12 tests (`test_token_revocation.py`) : révocation individuelle,
+  révocation globale, non-affection des autres sessions/utilisateurs,
+  interaction avec l'authentification WebSocket, purge des entrées expirées.
+
+### Corrigé pendant le développement
+- Bug découvert par un test qui enchaînait `login → logout/all → login` :
+  la comparaison de révocation globale, à la résolution de la seconde,
+  révoquait par erreur un jeton émis APRÈS la déconnexion globale s'il
+  arrivait dans la même seconde Unix (ce qu'un test automatisé rapide
+  déclenche facilement). Corrigé en ajoutant un claim `iat_ms` (résolution
+  milliseconde) utilisé uniquement pour cette comparaison, sans toucher au
+  format standard de `exp`/`iat`. Revérifié stable sur 5 exécutions
+  consécutives de la suite avant de considérer le correctif fiable.
+
+### Non traité
+- Pas d'en-têtes de sécurité (CSP, X-Frame-Options) — dernier point de
+  l'audit v1.4 encore ouvert, à faire avant toute exposition publique.
+
 ## [Non publié] — reconnexion automatique du WebSocket
 
 ### Ajouté

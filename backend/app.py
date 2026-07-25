@@ -11,18 +11,20 @@ import uuid
 import asyncio
 import json
 import io
+import time
 from contextlib import asynccontextmanager
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "c_ext"))
 
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Form, File, UploadFile
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Form, File, UploadFile, Header
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from PIL import Image, UnidentifiedImageError
 
 from database import init_db, get_conn
-from auth import hash_password, verify_password, create_token, get_current_user, decode_token
+from auth import hash_password, verify_password, create_token, decode_token
+from auth import get_current_user as _decode_and_verify_signature
 from realtime import manager
 from ratelimit import rate_limit
 
@@ -33,6 +35,57 @@ except ImportError:
         "Le module 'searchengine' (extension C) est introuvable. "
         "Compile-le avec : cd c_ext && python3 setup.py build_ext --inplace"
     )
+
+
+def get_current_user(authorization: str = Header(default=None)) -> dict:
+    """Dépendance FastAPI utilisée par (quasiment) toutes les routes protégées.
+
+    Enveloppe `auth.get_current_user` (renommé `_decode_and_verify_signature`
+    à l'import) : celle-ci vérifie la signature et l'expiration du jeton,
+    purement cryptographique, sans accès à la base. La révocation, elle,
+    nécessite de lire la base de données (un jeton individuellement révoqué
+    via /api/logout, ou une révocation globale via /api/logout/all) — cette
+    partie-là vit ici plutôt que dans auth.py, qui reste volontairement sans
+    dépendance à `database` (voir son docstring).
+    """
+    user = _decode_and_verify_signature(authorization)
+    _reject_if_revoked(user)
+    return user
+
+
+def _reject_if_revoked(user: dict) -> None:
+    """Lève une HTTPException 401 si le jeton représenté par `user` (dict
+    avec au moins "id", "iat", "jti", voir auth.get_current_user /
+    decode_token) a été révoqué, individuellement ou globalement.
+
+    Deux mécanismes indépendants, voir schema.sql pour le détail de chacun :
+    - `users.tokens_valid_after` : révocation GLOBALE (tous les jetons émis
+      avant cette date pour cet utilisateur sont invalides), comparée en
+      MILLISECONDES (`iat_ms`, pas `iat`) pour éviter les collisions entre
+      deux jetons émis pendant la même seconde. Comparaison `<=`
+      volontaire : un jeton émis la même milliseconde que l'appel à
+      /api/logout/all (y compris celui qui a servi à cet appel) est
+      considéré révoqué aussi — "déconnexion partout" doit aussi déconnecter
+      l'appareil courant, pas seulement "les autres".
+    - `revoked_tokens` : révocation INDIVIDUELLE d'UN jeton précis (une
+      "session"), via son `jti`. Utilisé par /api/logout (déconnexion d'un
+      seul appareil).
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT tokens_valid_after FROM users WHERE id = ?", (user["id"],)
+        ).fetchone()
+        if row and row["tokens_valid_after"] is not None and user["iat_ms"] <= row["tokens_valid_after"]:
+            raise HTTPException(
+                status_code=401,
+                detail="Session invalidée (déconnexion de tous les appareils). Reconnecte-toi.",
+            )
+
+        revoked = conn.execute(
+            "SELECT 1 FROM revoked_tokens WHERE jti = ?", (user["jti"],)
+        ).fetchone()
+        if revoked:
+            raise HTTPException(status_code=401, detail="Session révoquée (déconnexion). Reconnecte-toi.")
 
 
 @asynccontextmanager
@@ -200,13 +253,18 @@ async def websocket_endpoint(websocket: WebSocket):
         if not token:
             raise ValueError("champ 'token' manquant")
         payload = decode_token(token)
+        # Même vérification de révocation que get_current_user (routes
+        # HTTP) : sans elle, un jeton révoqué via /api/logout resterait
+        # utilisable pour ouvrir une connexion temps réel indéfiniment.
+        _reject_if_revoked({"id": int(payload["sub"]), "iat_ms": payload["iat_ms"], "jti": payload["jti"]})
     except (asyncio.TimeoutError, ValueError, KeyError, TypeError):
         await websocket.close(code=4401)
         return
     except HTTPException:
-        # decode_token() lève une HTTPException (jeton expiré/invalide) :
-        # pas de sens ici (pas de réponse HTTP possible sur un WebSocket),
-        # donc on la traduit en simple fermeture de connexion.
+        # decode_token() ou _reject_if_revoked() lève une HTTPException
+        # (jeton expiré/invalide/révoqué) : pas de sens ici (pas de réponse
+        # HTTP possible sur un WebSocket), donc on la traduit en simple
+        # fermeture de connexion.
         await websocket.close(code=4401)
         return
 
@@ -322,6 +380,67 @@ def login(body: LoginIn):
         raise HTTPException(status_code=401, detail="Identifiants incorrects.")
     token = create_token(row["id"], row["username"])
     return {"token": token, "username": row["username"]}
+
+
+# ---------- Révocation de jeton ----------
+# Un JWT est valable, par construction, jusqu'à sa date d'expiration (7
+# jours) même si l'utilisateur clique sur "déconnexion" : sans mécanisme
+# explicite, un jeton volé (XSS, appareil partagé oublié, etc.) reste
+# utilisable jusqu'à expiration naturelle, quoi qu'il arrive côté client.
+# Deux routes complémentaires :
+# - /api/logout révoque UN jeton précis (celui utilisé pour l'appel) : la
+#   session courante uniquement, les autres appareils connectés restent
+#   actifs.
+# - /api/logout/all révoque TOUS les jetons émis jusqu'à maintenant pour ce
+#   compte : utile si on soupçonne qu'un jeton a fuité et qu'on ne sait pas
+#   lequel précisément.
+
+@app.post("/api/logout")
+def logout(user=Depends(get_current_user)):
+    """Révoque le jeton actuellement utilisé (cette session précise).
+
+    Le jeton reste enregistré dans `revoked_tokens` jusqu'à SA date
+    d'expiration naturelle (`user["exp"]`) — inutile de le garder plus
+    longtemps : passé cette date, la vérification normale de signature
+    l'aurait de toute façon rejeté. Cette même requête purge au passage les
+    entrées déjà expirées d'autres révocations passées, pour que la table ne
+    grossisse pas indéfiniment sans jamais être nettoyée.
+    """
+    expires_at = datetime.datetime.fromtimestamp(
+        user["exp"], tz=datetime.timezone.utc
+    ).replace(tzinfo=None).isoformat()
+
+    with get_conn() as conn:
+        conn.execute("DELETE FROM revoked_tokens WHERE expires_at < ?", (now(),))
+        conn.execute(
+            "INSERT OR IGNORE INTO revoked_tokens (jti, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
+            (user["jti"], user["id"], expires_at, now()),
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@app.post("/api/logout/all")
+def logout_all(user=Depends(get_current_user)):
+    """Révoque TOUS les jetons émis jusqu'à maintenant pour ce compte,
+    y compris celui utilisé pour cet appel (voir _reject_if_revoked : la
+    comparaison est `iat <= tokens_valid_after`, pas `<`) — après cet appel,
+    il faut se reconnecter, même sur l'appareil d'où on vient de l'appeler.
+
+    Implémenté par une seule colonne (`users.tokens_valid_after`) plutôt que
+    par une liste de tous les jetons actifs à révoquer un par un : on ne
+    garde jamais trace des jetons valides (seulement, ailleurs, des jetons
+    individuellement révoqués), donc il serait impossible d'énumérer "tous
+    les jetons actifs" pour les invalider un par un. Repousser la date de
+    coupure a le même effet, sans avoir besoin de connaître les jetons eux-mêmes.
+    """
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE users SET tokens_valid_after = ? WHERE id = ?",
+            (int(time.time() * 1000), user["id"]),
+        )
+        conn.commit()
+    return {"ok": True}
 
 
 # ---------- Profil de l'utilisateur connecté ----------
