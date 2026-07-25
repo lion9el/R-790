@@ -109,7 +109,6 @@ fonctionnelle (chaque état stable est aussi marqué par un tag Git, ex: `v1.0`)
 ## Pistes d'évolution
 
 - Notification quand quelqu'un commente ton post (actuellement : likes/follows/messages/mentions)
-- Reconnexion automatique du WebSocket après une coupure
 - Blocage d'utilisateur
 - Déploiement : Postgres au lieu de SQLite pour la production,
   reverse-proxy (nginx) devant uvicorn, HTTPS

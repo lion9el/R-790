@@ -140,27 +140,49 @@ updateHeader();
 
 // ---------- Temps réel (WebSocket) ----------
 // Une seule connexion WebSocket, ouverte après login/register, fermée au
-// logout. Le serveur y pousse deux types d'événements : "message" (message
-// privé reçu) et "new_post" (nouveau post d'un compte suivi). Voir
-// backend/realtime.py et la route /ws dans backend/app.py.
+// logout. Le serveur y pousse trois types d'événements : "message" (message
+// privé reçu), "new_post" (nouveau post d'un compte suivi) et
+// "notification" (like/follow/mention). Voir backend/realtime.py et la
+// route /ws dans backend/app.py.
+//
+// Reconnexion automatique : toute coupure non voulue (veille du PC, Wi-Fi
+// qui coupe, redémarrage du serveur...) relance une tentative de connexion
+// avec un délai croissant (1s, 2s, 4s, 8s, 16s, plafonné à 30s) plutôt que
+// de laisser l'utilisateur sans mise à jour temps réel jusqu'à ce qu'il
+// retape 'login'. Un `intentionalDisconnect` distingue cette coupure subie
+// d'une fermeture volontaire (logout), qui ne doit surtout pas déclencher
+// de reconnexion.
 let socket = null;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
+let intentionalDisconnect = false;
+const RECONNECT_BASE_DELAY_MS = 1000;
+const RECONNECT_MAX_DELAY_MS = 30000;
 
 function connectRealtime() {
   if (!token) return;
+  intentionalDisconnect = false;
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   if (socket) { try { socket.close(); } catch (e) {} }
+
   const proto = location.protocol === "https:" ? "wss" : "ws";
   // Le jeton n'est PAS mis dans l'URL (`?token=...`) : un serveur ASGI comme
   // uvicorn logue par défaut le chemin complet AVEC sa query string, ce qui
   // ferait fuiter le jeton en clair dans les logs serveur (et ceux de tout
   // reverse-proxy devant). Il est envoyé comme premier message une fois la
   // connexion ouverte à la place — voir backend/app.py::websocket_endpoint.
-  socket = new WebSocket(`${proto}://${location.host}/ws`);
+  const thisSocket = new WebSocket(`${proto}://${location.host}/ws`);
+  socket = thisSocket;
 
-  socket.onopen = () => {
-    socket.send(JSON.stringify({ token }));
+  thisSocket.onopen = () => {
+    thisSocket.send(JSON.stringify({ token }));
+    if (reconnectAttempts > 0) {
+      print("🟢 Connexion temps réel rétablie.", "dim");
+    }
+    reconnectAttempts = 0;
   };
 
-  socket.onmessage = (event) => {
+  thisSocket.onmessage = (event) => {
     let data;
     try { data = JSON.parse(event.data); } catch (e) { return; }
     if (data.type === "message") {
@@ -171,12 +193,50 @@ function connectRealtime() {
       print(`🔔 [temps réel] ${formatNotification(data.notification)}`, "dim");
     }
   };
-  // Pas de reconnexion automatique pour l'instant : une perte de connexion
-  // (ex: veille du PC) nécessite de retaper 'login'. Limitation connue,
-  // voir CHANGELOG.md.
+
+  thisSocket.onclose = (event) => {
+    // Si `socket` a déjà été réassigné à une connexion plus récente (ex:
+    // connectRealtime() rappelé pendant que cette ancienne connexion était
+    // encore en train de se fermer), cet événement est obsolète : l'ancien
+    // socket n'est plus "le" socket actif, il ne faut ni le signaler comme
+    // une coupure ni programmer une reconnexion pour lui — la connexion
+    // actuelle gère déjà sa propre vie via son propre onclose.
+    if (socket !== thisSocket) return;
+    socket = null;
+    if (intentionalDisconnect || !token) return; // logout : rien à faire
+
+    if (event.code === 4401) {
+      // Jeton refusé (expiré, invalide) : retenter en boucle ne servirait à
+      // rien, le serveur refusera toujours. Il faut se reconnecter avec un
+      // nouveau jeton, donc retaper 'login'.
+      print("🔴 Session temps réel expirée — retape 'login' pour la rétablir.", "err");
+      return;
+    }
+    scheduleReconnect();
+  };
+  // Pas de socket.onerror dédié : le navigateur déclenche toujours onclose
+  // juste après un onerror sur un WebSocket, donc toute la logique de
+  // reconnexion vit dans onclose pour éviter de programmer deux tentatives
+  // en parallèle pour le même incident.
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return; // une tentative est déjà programmée
+  reconnectAttempts++;
+  if (reconnectAttempts === 1) {
+    print("🟡 Connexion temps réel perdue, nouvelle tentative en arrière-plan…", "dim");
+  }
+  const delay = Math.min(RECONNECT_MAX_DELAY_MS, RECONNECT_BASE_DELAY_MS * 2 ** (reconnectAttempts - 1));
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectRealtime();
+  }, delay);
 }
 
 function disconnectRealtime() {
+  intentionalDisconnect = true;
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  reconnectAttempts = 0;
   if (socket) { try { socket.close(); } catch (e) {} socket = null; }
 }
 
