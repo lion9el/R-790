@@ -5,6 +5,56 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
+## [Non publié] — durcissement sécurité
+
+Correction de 7 points relevés lors d'un audit sécurité du code existant.
+
+### Corrigé (impact élevé)
+- **Secret JWT** : suppression de la valeur par défaut faible codée en dur.
+  Si `SOCIALNET_SECRET` est absent, ou vaut encore le placeholder de
+  `.env.example` jamais remplacé, le serveur génère désormais un secret
+  aléatoire fort à chaque démarrage et affiche un avertissement explicite,
+  au lieu de retomber silencieusement sur une valeur connue de quiconque
+  lit le code source. `.env` est de plus réellement chargé maintenant
+  (ajout de `python-dotenv` — il ne servait à rien auparavant).
+- **Jeton WebSocket** : n'est plus passé dans l'URL (`/ws?token=...`, qui
+  finissait en clair dans les logs d'accès du serveur et de tout
+  reverse-proxy devant), mais envoyé comme premier message une fois la
+  connexion ouverte. A permis de découvrir et corriger au passage un bug
+  de double `accept()` de la connexion dans `realtime.py`.
+- **Upload d'images** : le contenu réel du fichier est désormais vérifié
+  avec Pillow (magic bytes + cohérence format/déclaration), le Content-Type
+  annoncé par le client ne suffit plus à lui seul (il est entièrement
+  falsifiable). Lecture par blocs avec abandon anticipé au-delà de la
+  limite de taille, plutôt que de tout charger en mémoire avant de vérifier.
+
+### Corrigé (impact moyen)
+- **Rate limiting** : `POST /api/register` (5/min/IP) et `POST /api/login`
+  (10/min/IP) sont désormais protégés contre les tentatives automatisées
+  (`backend/ratelimit.py`, limiteur en mémoire par fenêtre glissante).
+- **Dépendances figées** : `requirements.txt` et `requirements-dev.txt`
+  utilisent maintenant des versions exactes (`==`) plutôt que des bornes
+  ouvertes (`>=`), pour empêcher qu'un `pip install` futur ne tire
+  silencieusement une version différente.
+
+### Corrigé (impact faible, défense en profondeur)
+- `escapeHtml()` (frontend) échappe désormais aussi les guillemets, pas
+  seulement `&`/`<`/`>`.
+- `run.sh` : écoute sur `127.0.0.1` par défaut (au lieu de `0.0.0.0`),
+  configurable via `HOST=`/`PORT=`, avec avertissement explicite si on
+  choisit d'écouter sur toutes les interfaces.
+
+### Ajouté
+- 23 nouveaux tests couvrant chacun de ces points : `test_secret_key.py`,
+  `test_websocket_auth.py`, `test_image_upload.py`, `test_rate_limit.py`.
+
+### Non traité dans cette série (limitations documentées, pas de fix rapide)
+- Pas de révocation de jeton côté serveur (JWT valable 7 jours, "logout"
+  ne fait que l'oublier côté navigateur) : nécessiterait une liste noire ou
+  des jetons de rafraîchissement, hors périmètre de ce correctif.
+- Pas d'en-têtes de sécurité (CSP, X-Frame-Options) : à ajouter avant toute
+  exposition publique.
+
 ## [v1.3] — 2026-07-25 — édition de profil, édition/suppression de posts, notifications, pagination, tests, CI
 
 Version consolidant plusieurs évolutions développées en parallèle par
