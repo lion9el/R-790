@@ -5,7 +5,40 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
-## [Non publié] — durcissement sécurité
+## [Non publié] — hashtags et mentions
+
+### Ajouté
+- `#hashtag` dans un post : indexé dans une nouvelle table `post_hashtags`,
+  consultable via `GET /api/hashtags/{tag}` (pagination par curseur, comme
+  `/api/feed`) et `GET /api/hashtags/trending` (les plus utilisés). Reste à
+  jour à l'édition et à la suppression d'un post.
+- `@mention` valide (compte existant, hors auto-mention) dans un post ou un
+  commentaire : déclenche une notification de type `mention` (persistée +
+  push temps réel, même mécanisme que like/follow). Éditer un post ne
+  renotifie que les mentions nouvellement ajoutées.
+- Commandes terminal `hashtag <tag>` et `trending`. Les hashtags affichés
+  dans un post sont cliquables (lancent `hashtag <tag>`) ; hashtags et
+  mentions sont mis en évidence visuellement dans le contenu.
+- 16 tests (`test_hashtags_mentions.py`) : indexation, casse, dédoublonnage,
+  pagination, trending, réindexation à l'édition, désindexation à la
+  suppression, notifications de mention (post et commentaire), exclusion
+  auto-mention et mention d'un compte inexistant, non-répétition à l'édition.
+
+### Corrigé
+- Bug de commit manquant découvert pendant le développement de cette
+  fonctionnalité : `_index_hashtags` insérait sans `conn.commit()` explicite,
+  ce qui rendait l'insertion silencieusement perdue à la fermeture de la
+  connexion dans certains cas (voir l'encart dans ARCHITECTURE.md). Corrigé
+  dans `create_post` et `edit_post`.
+
+### Vérifié
+- Suite complète après fusion avec le durcissement sécurité (v1.4) :
+  142/142 tests (16 c_ext + 126 backend).
+- Scénario temps réel manuel rejoué avec la nouvelle authentification
+  WebSocket (jeton envoyé comme premier message, plus dans l'URL) : mention
+  reçue en direct, hashtag et trending retrouvés via l'API.
+
+## [v1.4] — durcissement sécurité
 
 Correction de 7 points relevés lors d'un audit sécurité du code existant.
 

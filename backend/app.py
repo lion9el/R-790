@@ -5,6 +5,7 @@ Lancer avec : uvicorn app:app --reload --port 8000
 """
 import sys
 import os
+import re
 import datetime
 import uuid
 import asyncio
@@ -396,6 +397,82 @@ def list_notifications(limit: int = 30, user=Depends(get_current_user)):
         return result
 
 
+# ---------- Hashtags et mentions ----------
+# Deux mini-fonctionnalités indépendantes qui partagent la même logique
+# d'extraction par expression régulière sur le texte d'un post ou commentaire :
+# - un hashtag (#exemple) sert à retrouver tous les posts qui le contiennent
+#   (table post_hashtags, indépendante du moteur de recherche C : on veut un
+#   classement chronologique exact, pas un score de pertinence textuelle) ;
+# - une mention (@pseudo) déclenche une notification pour l'utilisateur visé,
+#   s'il existe et si ce n'est pas lui-même qui se mentionne.
+
+# \w capture aussi les lettres accentuées en Python 3 (re.UNICODE par défaut),
+# donc #café ou @François fonctionnent. Longueur plafonnée pour éviter un
+# hashtag/mention démesuré construit exprès pour abuser du stockage.
+HASHTAG_RE = re.compile(r"#(\w{1,50})", re.UNICODE)
+MENTION_RE = re.compile(r"@(\w{1,30})", re.UNICODE)
+
+
+def _extract_hashtags(text: str) -> set[str]:
+    """Extrait les hashtags d'un texte, normalisés en minuscules et sans
+    doublons (#Python et #python comptent comme un seul hashtag)."""
+    return {tag.lower() for tag in HASHTAG_RE.findall(text)}
+
+
+def _extract_mentions(text: str) -> set[str]:
+    """Extrait les noms d'utilisateur mentionnés (@pseudo) dans un texte,
+    sans doublons. La casse est conservée ici ; la recherche du compte
+    correspondant se fait ensuite insensible à la casse (COLLATE NOCASE)."""
+    return set(MENTION_RE.findall(text))
+
+
+def _index_hashtags(conn, post_id: int, content: str) -> None:
+    """Enregistre les hashtags d'un post dans `post_hashtags`."""
+    for tag in _extract_hashtags(content):
+        conn.execute(
+            "INSERT OR IGNORE INTO post_hashtags (post_id, hashtag) VALUES (?, ?)",
+            (post_id, tag),
+        )
+
+
+def _deindex_hashtags(conn, post_id: int) -> None:
+    """Retire tous les hashtags associés à un post (avant réindexation lors
+    d'une édition, ou lors d'une suppression)."""
+    conn.execute("DELETE FROM post_hashtags WHERE post_id = ?", (post_id,))
+
+
+def _create_mention_notifications(conn, content: str, post_id: int, actor_id: int, actor_username: str, only_usernames=None) -> list:
+    """Crée une notification 'mention' pour chaque utilisateur valide
+    mentionné (@pseudo) dans `content`, hors auto-mention.
+
+    `only_usernames` : si fourni, restreint les notifications à cet
+    ensemble de pseudos déjà extraits ailleurs (utilisé par `edit_post` pour
+    ne notifier que les mentions nouvellement ajoutées lors d'une édition,
+    tout en gardant un aperçu du texte réellement publié dans la
+    notification plutôt qu'un texte reconstitué). Par défaut (`None`), les
+    mentions sont extraites directement de `content`.
+
+    Ne fait AUCUN appel réseau/WebSocket elle-même (voir _create_notification) :
+    renvoie juste la liste des `(user_id, notification)` à pousser en temps
+    réel, à traiter par l'appelant après la fermeture du `with get_conn()`,
+    comme pour les notifications de like et de follow.
+    """
+    snippet = content[:80] + ("…" if len(content) > 80 else "")
+    usernames = only_usernames if only_usernames is not None else _extract_mentions(content)
+    to_push = []
+    for uname in usernames:
+        target = conn.execute(
+            "SELECT id, username FROM users WHERE username = ? COLLATE NOCASE", (uname,)
+        ).fetchone()
+        if not target or target["id"] == actor_id:
+            continue
+        notification = _create_notification(
+            conn, target["id"], "mention", actor_username, post_id=post_id, content=snippet
+        )
+        to_push.append((target["id"], notification))
+    return to_push
+
+
 # ---------- Posts / fil d'actualité ----------
 
 def _serialize_posts(conn, rows, current_user_id):
@@ -484,8 +561,11 @@ async def create_post(
 
     Insère en base ET indexe le texte dans le moteur de recherche C dans la
     même opération : un post créé est immédiatement trouvable par `search`.
-    Notifie aussi en temps réel (WebSocket) les followers actuellement
-    connectés, pour que leur fil se mette à jour sans action de leur part.
+    Les hashtags (#exemple) sont indexés pour `GET /api/hashtags/{tag}`, et
+    chaque mention (@pseudo) valide déclenche une notification pour la
+    personne visée. Notifie aussi en temps réel (WebSocket) les followers
+    actuellement connectés, pour que leur fil se mette à jour sans action
+    de leur part.
     """
     image_filename = None
     if image is not None and image.filename:
@@ -499,14 +579,19 @@ async def create_post(
         conn.commit()
         post_id = cur.lastrowid
         searchengine.index_add(post_id, content)
+        _index_hashtags(conn, post_id, content)
+        conn.commit()
         row = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
         serialized = _serialize_post(conn, row, user["id"])
         follower_ids = [
             r["follower_id"]
             for r in conn.execute("SELECT follower_id FROM follows WHERE followed_id = ?", (user["id"],))
         ]
+        mention_notifications = _create_mention_notifications(conn, content, post_id, user["id"], user["username"])
 
     await manager.broadcast_to_users(follower_ids, {"type": "new_post", "post": serialized})
+    for target_id, notification in mention_notifications:
+        await manager.send_to_user(target_id, {"type": "notification", "notification": notification})
     return serialized
 
 
@@ -545,6 +630,60 @@ def feed(limit: int = 30, before: int | None = None, user=Depends(get_current_us
             LIMIT ?
             """,
             (user["id"], user["id"], before, before, limit + 1),
+        ).fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        posts = _serialize_posts(conn, rows, user["id"])
+        next_cursor = rows[-1]["id"] if has_more and rows else None
+        return {"posts": posts, "has_more": has_more, "next_cursor": next_cursor}
+
+
+# ---------- Hashtags (routes) ----------
+# ATTENTION À L'ORDRE : "/api/hashtags/trending" doit être déclarée AVANT
+# "/api/hashtags/{tag}", sinon FastAPI ferait correspondre une requête sur
+# "trending" au paramètre dynamique {tag} de la route générique (les routes
+# sont testées dans leur ordre de déclaration).
+
+@app.get("/api/hashtags/trending")
+def trending_hashtags(limit: int = 10, user=Depends(get_current_user)):
+    """Hashtags les plus utilisés tous posts confondus, du plus fréquent au
+    moins fréquent (nombre de posts distincts contenant ce hashtag)."""
+    limit = max(1, min(limit, 50))
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT hashtag, COUNT(*) as count FROM post_hashtags
+            GROUP BY hashtag ORDER BY count DESC, hashtag ASC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [{"hashtag": r["hashtag"], "count": r["count"]} for r in rows]
+
+
+@app.get("/api/hashtags/{tag}")
+def posts_by_hashtag(tag: str, limit: int = 20, before: int | None = None, user=Depends(get_current_user)):
+    """Liste les posts contenant le hashtag `tag`, du plus récent au plus
+    ancien. Même pagination par curseur que `/api/feed` (voir sa docstring
+    pour le détail du principe) — réponse sous la même forme
+    `{"posts": [...], "has_more": bool, "next_cursor": id|null}`.
+
+    Le `#` initial est optionnel dans l'URL (`/api/hashtags/python` et
+    `/api/hashtags/%23python` renvoient le même résultat) ; la comparaison
+    est insensible à la casse (les hashtags sont stockés en minuscules,
+    voir `_index_hashtags`).
+    """
+    limit = max(1, min(limit, 100))
+    tag_normalized = tag.lower().lstrip("#")
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT p.* FROM posts p
+            JOIN post_hashtags h ON h.post_id = p.id
+            WHERE h.hashtag = ? AND (? IS NULL OR p.id < ?)
+            ORDER BY p.id DESC
+            LIMIT ?
+            """,
+            (tag_normalized, before, before, limit + 1),
         ).fetchall()
         has_more = len(rows) > limit
         rows = rows[:limit]
@@ -607,13 +746,17 @@ def unlike_post(post_id: int, user=Depends(get_current_user)):
 
 
 @app.patch("/api/posts/{post_id}")
-def edit_post(post_id: int, body: PostEditIn, user=Depends(get_current_user)):
+async def edit_post(post_id: int, body: PostEditIn, user=Depends(get_current_user)):
     """Modifie le texte d'un post dont l'utilisateur courant est l'auteur.
 
     L'index de recherche est mis à jour dans la même opération : on retire
     l'ancien texte (`index_remove` a besoin du texte d'origine pour savoir
     quels mots désindexer) avant d'indexer le nouveau, sinon une recherche
-    sur un mot supprimé continuerait de remonter le post.
+    sur un mot supprimé continuerait de remonter le post. Les hashtags sont
+    réindexés de la même façon (retrait puis ré-ajout). Les mentions ajoutées
+    par cette modification déclenchent une nouvelle notification — mais
+    seulement les nouvelles : si un pseudo était déjà mentionné avant
+    l'édition, on ne renotifie pas (voir le calcul de `new_mentions`).
 
     L'image jointe n'est pas modifiable : seul le texte l'est.
     """
@@ -628,15 +771,30 @@ def edit_post(post_id: int, body: PostEditIn, user=Depends(get_current_user)):
         conn.commit()
         searchengine.index_remove(post_id, row["content"])
         searchengine.index_add(post_id, body.content)
+        _deindex_hashtags(conn, post_id)
+        _index_hashtags(conn, post_id, body.content)
+        conn.commit()
+
+        new_mentions = _extract_mentions(body.content) - _extract_mentions(row["content"])
+        mention_notifications = []
+        if new_mentions:
+            mention_notifications = _create_mention_notifications(
+                conn, body.content, post_id, user["id"], user["username"], only_usernames=new_mentions
+            )
+
         updated = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
-        return _serialize_post(conn, updated, user["id"])
+        serialized = _serialize_post(conn, updated, user["id"])
+
+    for target_id, notification in mention_notifications:
+        await manager.send_to_user(target_id, {"type": "notification", "notification": notification})
+    return serialized
 
 
 @app.delete("/api/posts/{post_id}")
 def delete_post(post_id: int, user=Depends(get_current_user)):
     """Supprime un post dont l'utilisateur courant est l'auteur, ainsi que
-    tout ce qui en dépend : likes, commentaires, image jointe et entrées
-    dans l'index de recherche.
+    tout ce qui en dépend : likes, commentaires, hashtags, image jointe et
+    entrées dans l'index de recherche.
 
     Les likes et commentaires doivent partir en premier : ils référencent
     `posts(id)` par clé étrangère (activée dans database.py) et la
@@ -653,6 +811,7 @@ def delete_post(post_id: int, user=Depends(get_current_user)):
         conn.execute("DELETE FROM likes WHERE post_id = ?", (post_id,))
         conn.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
         conn.execute("DELETE FROM notifications WHERE post_id = ?", (post_id,))
+        _deindex_hashtags(conn, post_id)
         conn.execute("DELETE FROM posts WHERE id = ?", (post_id,))
         conn.commit()
 
@@ -668,8 +827,15 @@ def delete_post(post_id: int, user=Depends(get_current_user)):
 
 
 @app.post("/api/posts/{post_id}/comments")
-def add_comment(post_id: int, body: CommentIn, user=Depends(get_current_user)):
-    """Ajoute un commentaire de l'utilisateur courant sur un post existant."""
+async def add_comment(post_id: int, body: CommentIn, user=Depends(get_current_user)):
+    """Ajoute un commentaire de l'utilisateur courant sur un post existant.
+
+    Une mention (@pseudo) valide dans le commentaire déclenche une
+    notification pour la personne visée, au même titre qu'une mention dans
+    un post (voir _create_mention_notifications) — `post_id` sert de
+    référence pour retrouver le contexte (le post commenté), le commentaire
+    lui-même n'a pas d'identité propre dans les notifications.
+    """
     with get_conn() as conn:
         post = conn.execute("SELECT id FROM posts WHERE id = ?", (post_id,)).fetchone()
         if not post:
@@ -679,7 +845,13 @@ def add_comment(post_id: int, body: CommentIn, user=Depends(get_current_user)):
             (post_id, user["id"], body.content, now()),
         )
         conn.commit()
-        return {"ok": True}
+        mention_notifications = _create_mention_notifications(
+            conn, body.content, post_id, user["id"], user["username"]
+        )
+
+    for target_id, notification in mention_notifications:
+        await manager.send_to_user(target_id, {"type": "notification", "notification": notification})
+    return {"ok": True}
 
 
 @app.get("/api/posts/{post_id}/comments")

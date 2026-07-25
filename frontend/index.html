@@ -58,6 +58,11 @@
   }
   .post .meta { color: var(--amber-dim); font-size: 12px; }
   .post .content { color: var(--amber); }
+  .post .content .hashtag {
+    color: #fff; cursor: pointer; text-decoration: underline dotted var(--amber-dim);
+  }
+  .post .content .hashtag:hover { text-decoration-style: solid; }
+  .post .content .mention { color: #fff; font-weight: 600; }
   .post .post-image {
     max-width: 320px; max-height: 320px; margin-top: 6px;
     border: 1px solid var(--amber-faint); display: block;
@@ -110,7 +115,7 @@ let pendingPostText = null; // texte en attente pendant que l'utilisateur choisi
 // second écrase le premier). `more` regarde ce champ pour savoir quoi
 // continuer. `null` quand il n'y a rien à paginer (pas encore de feed/search
 // lancé, ou dernière page déjà atteinte).
-let pagination = null; // { type: "feed", limit, cursor } | { type: "search", limit, query, offset }
+let pagination = null; // { type: "feed", limit, cursor } | { type: "search", limit, query, offset } | { type: "hashtag", limit, tag, cursor }
 
 function print(text, cls) {
   const div = document.createElement("div");
@@ -228,10 +233,24 @@ function fmtPost(p) {
     : "";
   return `<div class="post">` +
     `<div class="meta">#${p.id} @${escapeHtml(p.author)} — ${fmtDate(p.created_at)}${p.score !== undefined ? " (score " + p.score + ")" : ""}</div>` +
-    `<div class="content">${escapeHtml(p.content)}</div>` +
+    `<div class="content">${highlightTags(p.content)}</div>` +
     imageHtml +
     `<div class="meta">${liked} ${p.likes} likes · 💬 ${p.comments} commentaires</div>` +
     `</div>`;
+}
+
+// Met en évidence les #hashtags (cliquables : lancent la commande
+// 'hashtag <tag>') et les @mentions dans le contenu d'un post ou commentaire.
+// IMPORTANT : on échappe TOUJOURS le texte AVANT d'y chercher les motifs
+// #/@, jamais après — sinon un post contenant par exemple "<script>@x"
+// pourrait réintroduire du HTML non échappé. Les <span> ajoutés ensuite ne
+// contiennent que des caractères qu'on contrôle nous-mêmes (le tag/pseudo
+// déjà échappé), jamais de texte utilisateur brut réinjecté tel quel.
+function highlightTags(text) {
+  const escaped = escapeHtml(text);
+  return escaped
+    .replace(/#(\w{1,50})/gu, (match, tag) => `<span class="hashtag" onclick="runCommand('hashtag ${tag.toLowerCase()}')">${match}</span>`)
+    .replace(/@(\w{1,30})/gu, (match) => `<span class="mention">${match}</span>`);
 }
 
 function fmtDate(iso) {
@@ -246,6 +265,7 @@ function formatNotification(n) {
   if (n.type === "like") return `❤️ @${n.from} a aimé ton post #${n.post_id} — ${when}`;
   if (n.type === "follow") return `➕ @${n.from} te suit maintenant — ${when}`;
   if (n.type === "message") return `💬 @${n.from} t'a envoyé un message : ${n.content} — ${when}`;
+  if (n.type === "mention") return `📣 @${n.from} t'a mentionné (post #${n.post_id}) : ${n.content} — ${when}`;
   return `🔔 notification de @${n.from} — ${when}`;
 }
 
@@ -280,7 +300,7 @@ const COMMANDS = {
     print("  post <texte>                 publier un post");
     print("  postimg <texte>              publier un post avec une image jointe");
     print("  feed [n]                     afficher le fil d'actualité (n = taille de page, 30 par défaut)");
-    print("  more                         voir la suite du dernier 'feed' ou 'search'");
+    print("  more                         voir la suite du dernier 'feed', 'search' ou 'hashtag'");
     print("  like <id>                    liker un post");
     print("  unlike <id>                  retirer son like");
     print("  comment <id> <texte>         commenter un post");
@@ -297,6 +317,8 @@ const COMMANDS = {
     print("  inbox                        liste des conversations");
     print("  notifications                voir les notifications (likes, follows, messages)");
     print("  search <mots>                rechercher des posts (moteur C)");
+    print("  hashtag <tag>                voir les posts contenant #tag");
+    print("  trending                     hashtags les plus utilisés");
     print("  clear                        vider l'écran");
   },
 
@@ -506,9 +528,31 @@ const COMMANDS = {
     if (data.has_more) print("— tape 'more' pour voir la suite des résultats —", "dim");
   },
 
+  async hashtag(args) {
+    if (!requireAuth()) return;
+    const tag = (args[0] || "").replace(/^#/, "").toLowerCase();
+    if (!tag) return print("usage: hashtag <tag> (sans le #)", "err");
+    const limit = 20;
+    const data = await api("GET", `/api/hashtags/${encodeURIComponent(tag)}?limit=${limit}`);
+    if (data.posts.length === 0) {
+      pagination = null;
+      return print(`Aucun post avec #${tag}.`, "dim");
+    }
+    data.posts.forEach(p => printHTML(fmtPost(p)));
+    pagination = data.has_more ? { type: "hashtag", limit, tag, cursor: data.next_cursor } : null;
+    if (data.has_more) print("— tape 'more' pour voir la suite —", "dim");
+  },
+
+  async trending() {
+    if (!requireAuth()) return;
+    const list = await api("GET", "/api/hashtags/trending");
+    if (list.length === 0) return print("Aucun hashtag utilisé pour l'instant.", "dim");
+    list.forEach((h, i) => print(`  ${i + 1}. #${h.hashtag} (${h.count} post${h.count > 1 ? "s" : ""})`));
+  },
+
   async more() {
     if (!requireAuth()) return;
-    if (!pagination) return print("Rien à continuer : lance d'abord 'feed' ou 'search'.", "dim");
+    if (!pagination) return print("Rien à continuer : lance d'abord 'feed', 'search' ou 'hashtag'.", "dim");
 
     if (pagination.type === "feed") {
       const { limit, cursor } = pagination;
@@ -530,6 +574,16 @@ const COMMANDS = {
       data.results.forEach(p => printHTML(fmtPost(p)));
       pagination = data.has_more ? { type: "search", limit, query, offset: data.next_offset } : null;
       if (data.has_more) print("— tape 'more' pour voir la suite des résultats —", "dim");
+    } else if (pagination.type === "hashtag") {
+      const { limit, tag, cursor } = pagination;
+      const data = await api("GET", `/api/hashtags/${encodeURIComponent(tag)}?limit=${limit}&before=${cursor}`);
+      if (data.posts.length === 0) {
+        pagination = null;
+        return print(`Plus rien avec #${tag}.`, "dim");
+      }
+      data.posts.forEach(p => printHTML(fmtPost(p)));
+      pagination = data.has_more ? { type: "hashtag", limit, tag, cursor: data.next_cursor } : null;
+      if (data.has_more) print("— tape 'more' pour voir la suite —", "dim");
     }
   },
 
