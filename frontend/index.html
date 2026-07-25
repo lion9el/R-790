@@ -144,7 +144,16 @@ function connectRealtime() {
   if (!token) return;
   if (socket) { try { socket.close(); } catch (e) {} }
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  socket = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+  // Le jeton n'est PAS mis dans l'URL (`?token=...`) : un serveur ASGI comme
+  // uvicorn logue par défaut le chemin complet AVEC sa query string, ce qui
+  // ferait fuiter le jeton en clair dans les logs serveur (et ceux de tout
+  // reverse-proxy devant). Il est envoyé comme premier message une fois la
+  // connexion ouverte à la place — voir backend/app.py::websocket_endpoint.
+  socket = new WebSocket(`${proto}://${location.host}/ws`);
+
+  socket.onopen = () => {
+    socket.send(JSON.stringify({ token }));
+  };
 
   socket.onmessage = (event) => {
     let data;
@@ -241,7 +250,19 @@ function formatNotification(n) {
 }
 
 function escapeHtml(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // Échappe aussi les guillemets (pas seulement & < >) : `imageHtml` plus
+  // haut insère `p.image_url` dans un attribut HTML (`src="..."`), pas
+  // seulement dans du texte. Aujourd'hui image_url est toujours un nom de
+  // fichier généré côté serveur (UUID), donc ce n'est pas exploitable en
+  // pratique — mais si un champ moins contrôlé passe un jour par innerHTML
+  // dans un contexte attribut, ne pas échapper les guillemets permettrait
+  // d'en sortir (ex: `" onerror="alert(1)`) et d'injecter du JS.
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function requireAuth() {

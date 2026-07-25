@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import database
+import ratelimit
 
 
 @pytest.fixture
@@ -40,15 +41,30 @@ def client(tmp_path, monkeypatch):
       réutilisé tel quel par tous les tests. En important après le patch et
       en s'appuyant sur le fait que get_conn relit DB_PATH à chaque appel
       (pas de valeur figée à l'import), chaque test voit bien sa propre base.
+    - `ratelimit.reset()` vide les compteurs de tentatives (voir
+      ratelimit.py) : comme searchengine, ce module garde son état dans une
+      variable globale du process, partagée par tous les tests. Sans ce
+      reset, les appels à /api/register et /api/login des tests précédents
+      s'accumuleraient et finiraient par déclencher des 429 dans des tests
+      qui n'ont rien à voir avec le rate limiting.
     """
     db_path = tmp_path / "test_socialnet.db"
     monkeypatch.setattr(database, "DB_PATH", str(db_path))
+    ratelimit.reset()
 
     # Import différé : évite qu'un précédent test ait déjà importé `app`
     # avec un état de module différent (le module reste le même objet d'un
     # test à l'autre de toute façon, seul `database.DB_PATH` change, mais
     # réimporter ici documente clairement la dépendance à l'ordre du patch).
     import app as app_module
+
+    # Isole aussi les fichiers uploadés (voir test_image_upload.py) dans un
+    # dossier temporaire propre à ce test, plutôt que le vrai
+    # backend/uploads/ : sans ça, chaque exécution de la suite de tests
+    # laisserait de vrais fichiers image sur disque, jamais nettoyés.
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", str(upload_dir))
 
     with TestClient(app_module.app) as c:
         yield c

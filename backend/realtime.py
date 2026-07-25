@@ -26,8 +26,15 @@ class ConnectionManager:
         self.active: dict[int, set[WebSocket]] = {}
 
     async def connect(self, user_id: int, websocket: WebSocket) -> None:
-        """Accepte la connexion WebSocket et l'enregistre pour cet utilisateur."""
-        await websocket.accept()
+        """Enregistre une connexion WebSocket déjà acceptée pour cet utilisateur.
+
+        N'appelle PAS `websocket.accept()` : la connexion est acceptée en
+        amont, dans `app.py::websocket_endpoint`, AVANT l'authentification
+        (le protocole WebSocket exige d'accepter la connexion pour pouvoir
+        ensuite lire le premier message contenant le jeton — on ne connaît
+        `user_id` qu'une fois ce message reçu et validé, donc l'ordre est
+        forcément : accept() d'abord, connect() ensuite).
+        """
         self.active.setdefault(user_id, set()).add(websocket)
 
     def disconnect(self, user_id: int, websocket: WebSocket) -> None:

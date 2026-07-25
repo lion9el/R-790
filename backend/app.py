@@ -7,6 +7,9 @@ import sys
 import os
 import datetime
 import uuid
+import asyncio
+import json
+import io
 from contextlib import asynccontextmanager
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "c_ext"))
@@ -15,10 +18,12 @@ from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconn
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from PIL import Image, UnidentifiedImageError
 
 from database import init_db, get_conn
 from auth import hash_password, verify_password, create_token, get_current_user, decode_token
 from realtime import manager
+from ratelimit import rate_limit
 
 try:
     import searchengine
@@ -56,41 +61,97 @@ app = FastAPI(title="Réseau social terminal", lifespan=lifespan)
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Seuls ces types MIME sont acceptés. On se base sur le Content-Type déclaré
-# par le navigateur (pas sur le nom de fichier envoyé par le client, qui
-# n'est jamais fiable) pour choisir l'extension du fichier stocké.
+# Seuls ces types MIME sont acceptés. Le Content-Type déclaré par le client
+# sert de filtre initial ET détermine l'extension du fichier stocké, mais
+# n'est PAS la seule vérification : ce header est entièrement falsifiable
+# (n'importe qui peut envoyer n'importe quels octets avec l'en-tête de son
+# choix via curl/Postman, pas besoin d'un navigateur). Le contenu réel est
+# donc revérifié plus bas avec Pillow (magic bytes), voir _save_uploaded_image.
 ALLOWED_IMAGE_TYPES = {
-    "image/png": ".png",
-    "image/jpeg": ".jpg",
-    "image/gif": ".gif",
-    "image/webp": ".webp",
+    "image/png": (".png", "PNG"),
+    "image/jpeg": (".jpg", "JPEG"),
+    "image/gif": (".gif", "GIF"),
+    "image/webp": (".webp", "WEBP"),
 }
 MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 Mo
+UPLOAD_CHUNK_SIZE = 64 * 1024  # taille des blocs lus depuis le flux réseau
+
+# Délai laissé au client pour envoyer son message d'authentification une
+# fois le WebSocket accepté (voir websocket_endpoint). Assez court pour ne
+# pas laisser une connexion non authentifiée traîner indéfiniment, assez
+# long pour tolérer une connexion réseau lente.
+AUTH_TIMEOUT_SECONDS = 5
+
+
+async def _read_upload_with_limit(upload: UploadFile, max_size: int) -> bytes:
+    """Lit un fichier uploadé par blocs, en abandonnant dès que `max_size`
+    est dépassé, plutôt que de lire tout le corps de la requête en mémoire
+    avant de vérifier sa taille. Sans ça, un client (pas forcément un
+    navigateur — curl, script) pourrait envoyer un fichier de plusieurs Go
+    et faire lire l'intégralité en RAM avant que la vérification de taille
+    n'ait la moindre chance de s'exécuter.
+    """
+    chunks = []
+    total = 0
+    while True:
+        chunk = await upload.read(UPLOAD_CHUNK_SIZE)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_size:
+            raise HTTPException(status_code=400, detail="Image trop volumineuse (5 Mo maximum).")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 async def _save_uploaded_image(image: UploadFile) -> str:
     """Valide et enregistre une image uploadée, renvoie son nom de fichier.
 
-    - Le type de fichier est vérifié contre une liste blanche (pas de .exe,
-      .php, etc. déguisés en image).
+    - Le type déclaré est vérifié contre une liste blanche (pas de .exe,
+      .php, etc. déguisés en image via l'en-tête Content-Type).
+    - Le CONTENU est ensuite revérifié avec Pillow (`Image.open(...).verify()`
+      puis contrôle du format détecté) : un fichier dont les octets ne sont
+      pas réellement une image du format annoncé est rejeté, même si son
+      Content-Type déclaré était dans la liste blanche. Sans cette étape,
+      n'importe quel fichier passerait la validation en se contentant de
+      mentir sur son Content-Type.
     - Le nom de fichier final est généré aléatoirement (UUID) : on ignore
       totalement le nom envoyé par le client, ce qui élimine tout risque de
       "path traversal" (ex: un nom de fichier contenant "../../").
-    - La taille est plafonnée à MAX_IMAGE_SIZE pour éviter qu'un upload
-      énorme ne sature le disque ou la mémoire du serveur.
+    - La taille est plafonnée à MAX_IMAGE_SIZE, vérifiée au fil de la
+      lecture (voir _read_upload_with_limit) plutôt qu'après coup.
     """
     if image.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(
             status_code=400,
             detail="Format d'image non supporté (formats acceptés : PNG, JPEG, GIF, WEBP).",
         )
-    data = await image.read()
-    if len(data) > MAX_IMAGE_SIZE:
-        raise HTTPException(status_code=400, detail="Image trop volumineuse (5 Mo maximum).")
+    extension, expected_format = ALLOWED_IMAGE_TYPES[image.content_type]
+
+    data = await _read_upload_with_limit(image, MAX_IMAGE_SIZE)
     if len(data) == 0:
         raise HTTPException(status_code=400, detail="Fichier image vide.")
 
-    filename = uuid.uuid4().hex + ALLOWED_IMAGE_TYPES[image.content_type]
+    try:
+        with Image.open(io.BytesIO(data)) as probe:
+            probe.verify()  # lève une exception si ce ne sont pas des octets d'image valides
+        # verify() consomme/invalide l'objet ouvert : il faut rouvrir pour
+        # pouvoir encore lire son format détecté juste après.
+        with Image.open(io.BytesIO(data)) as reopened:
+            actual_format = reopened.format
+    except (UnidentifiedImageError, OSError, ValueError):
+        raise HTTPException(status_code=400, detail="Le fichier envoyé n'est pas une image valide.")
+
+    if actual_format != expected_format:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Le contenu du fichier ({actual_format or 'format inconnu'}) ne correspond pas "
+                f"au type déclaré ({expected_format})."
+            ),
+        )
+
+    filename = uuid.uuid4().hex + extension
     filepath = os.path.join(UPLOAD_DIR, filename)
     with open(filepath, "wb") as f:
         f.write(data)
@@ -110,26 +171,41 @@ def now() -> str:
 # ---------- Temps réel (WebSocket) ----------
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, token: str | None = None):
+async def websocket_endpoint(websocket: WebSocket):
     """Connexion temps réel : pousse au navigateur les nouveaux messages
     privés reçus et les nouveaux posts des comptes suivis, sans qu'il soit
     nécessaire de retaper une commande pour rafraîchir.
 
-    Authentification par jeton JWT passé en paramètre de l'URL
-    (ws://.../ws?token=...) plutôt qu'en en-tête HTTP classique : l'API des
-    navigateurs pour ouvrir un WebSocket ne permet pas d'y ajouter un en-tête
-    Authorization personnalisé.
-
-    Cette route ne fait que garder la connexion ouverte et écouter sa
-    fermeture ; les messages envoyés PAR le client ne sont pas traités pour
-    l'instant (le canal est actuellement à sens unique : serveur → client).
+    Authentification : le jeton JWT n'est PAS passé en paramètre de l'URL
+    (ws://.../ws?token=...) — un serveur ASGI comme uvicorn logue par défaut
+    le chemin complet AVEC sa query string dans ses access logs, ce qui
+    ferait fuiter le jeton de session en clair dans ces logs (et ceux de
+    tout reverse-proxy/CDN placé devant). À la place :
+    1. La connexion est acceptée sans authentification.
+    2. Le client DOIT envoyer, comme tout premier message, un JSON
+       `{"token": "<jwt>"}`.
+    3. Si ce premier message est absent, invalide, ou n'arrive pas dans les
+       `AUTH_TIMEOUT_SECONDS`, la connexion est fermée sans avoir jamais été
+       enregistrée dans le ConnectionManager.
+    Ce message-là ne transite que sur le canal WebSocket déjà établi
+    (jamais dans une URL), donc jamais dans un log d'accès HTTP classique.
     """
-    if not token:
+    await websocket.accept()
+
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=AUTH_TIMEOUT_SECONDS)
+        auth_message = json.loads(raw)
+        token = auth_message.get("token")
+        if not token:
+            raise ValueError("champ 'token' manquant")
+        payload = decode_token(token)
+    except (asyncio.TimeoutError, ValueError, KeyError, TypeError):
         await websocket.close(code=4401)
         return
-    try:
-        payload = decode_token(token)
-    except Exception:
+    except HTTPException:
+        # decode_token() lève une HTTPException (jeton expiré/invalide) :
+        # pas de sens ici (pas de réponse HTTP possible sur un WebSocket),
+        # donc on la traduit en simple fermeture de connexion.
         await websocket.close(code=4401)
         return
 
@@ -137,8 +213,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = None):
     await manager.connect(user_id, websocket)
     try:
         while True:
-            # On ne fait rien du contenu reçu : cette boucle sert uniquement
-            # à détecter la déconnexion (fermeture d'onglet, perte réseau).
+            # On ne fait rien du contenu reçu après l'authentification :
+            # cette boucle sert uniquement à détecter la déconnexion
+            # (fermeture d'onglet, perte réseau).
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(user_id, websocket)
@@ -200,12 +277,15 @@ class MessageIn(BaseModel):
 
 # ---------- Auth ----------
 
-@app.post("/api/register")
+@app.post("/api/register", dependencies=[Depends(rate_limit(5, 60))])
 def register(body: RegisterIn):
     """Crée un nouveau compte utilisateur et renvoie directement un jeton de
     session (l'utilisateur est connecté automatiquement après inscription).
 
     Échoue avec 400 si le nom d'utilisateur est déjà pris.
+
+    Limité à 5 inscriptions par minute et par IP (voir ratelimit.py) : évite
+    la création massive et automatisée de comptes.
     """
     with get_conn() as conn:
         existing = conn.execute("SELECT id FROM users WHERE username = ?", (body.username,)).fetchone()
@@ -222,13 +302,18 @@ def register(body: RegisterIn):
     return {"token": token, "username": body.username}
 
 
-@app.post("/api/login")
+@app.post("/api/login", dependencies=[Depends(rate_limit(10, 60))])
 def login(body: LoginIn):
     """Vérifie les identifiants et renvoie un jeton JWT valable 7 jours.
 
     Échoue avec 401 (identifiants incorrects) sans préciser si c'est le nom
     d'utilisateur ou le mot de passe qui est faux, pour ne pas aider à
     deviner les comptes existants.
+
+    Limité à 10 tentatives par minute et par IP (voir ratelimit.py) : ralentit
+    une attaque par force brute sur les mots de passe. Plus permissif que
+    /api/register (10 contre 5) pour tolérer les fautes de frappe d'un
+    utilisateur légitime sans le bloquer trop vite.
     """
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM users WHERE username = ?", (body.username,)).fetchone()
