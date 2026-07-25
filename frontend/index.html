@@ -153,6 +153,8 @@ function connectRealtime() {
       print(`💬 [temps réel] message de @${data.from}: ${data.content}`, "dim");
     } else if (data.type === "new_post") {
       print(`📰 [temps réel] nouveau post de @${data.post.author} — tape 'feed' pour le voir`, "dim");
+    } else if (data.type === "notification") {
+      print(`🔔 [temps réel] ${formatNotification(data.notification)}`, "dim");
     }
   };
   // Pas de reconnexion automatique pour l'instant : une perte de connexion
@@ -230,6 +232,14 @@ function fmtDate(iso) {
   } catch (e) { return iso; }
 }
 
+function formatNotification(n) {
+  const when = fmtDate(n.created_at);
+  if (n.type === "like") return `❤️ @${n.from} a aimé ton post #${n.post_id} — ${when}`;
+  if (n.type === "follow") return `➕ @${n.from} te suit maintenant — ${when}`;
+  if (n.type === "message") return `💬 @${n.from} t'a envoyé un message : ${n.content} — ${when}`;
+  return `🔔 notification de @${n.from} — ${when}`;
+}
+
 function escapeHtml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -264,6 +274,7 @@ const COMMANDS = {
     print("  msg <user> <texte>           envoyer un message privé");
     print("  conv <user>                  voir une conversation");
     print("  inbox                        liste des conversations");
+    print("  notifications                voir les notifications (likes, follows, messages)");
     print("  search <mots>                rechercher des posts (moteur C)");
     print("  clear                        vider l'écran");
   },
@@ -450,6 +461,13 @@ const COMMANDS = {
     const list = await api("GET", "/api/inbox");
     if (list.length === 0) return print("Boîte de réception vide.", "dim");
     list.forEach(c => print(`  @${c.with} ${c.unread > 0 ? "(" + c.unread + " non lus)" : ""}`));
+  },
+
+  async notifications() {
+    if (!requireAuth()) return;
+    const list = await api("GET", "/api/notifications");
+    if (list.length === 0) return print("Aucune notification.", "dim");
+    list.forEach(n => print(`  ${!n.is_read ? "● " : "  "}${formatNotification(n)}`));
   },
 
   async search(args) {
