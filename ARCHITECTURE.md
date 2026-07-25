@@ -67,15 +67,36 @@ indexation, scoring, tri, pagination, suppression, isolation entre tests.
 | `schema.sql` | Définition des tables (users, posts, likes, comments, follows, messages). |
 | `realtime.py` | Registre des connexions WebSocket actives (`ConnectionManager`) ; pousse les événements "nouveau message" et "nouveau post" aux utilisateurs connectés. |
 | `uploads/` | Images jointes aux posts, stockées telles quelles sur disque (nom généré aléatoirement). Hors Git — voir `.gitignore`. |
-| `tests/` | Suite pytest (83 tests) : auth, posts, likes, commentaires, follow, profils, messagerie, notifications, pagination. Chaque test tourne sur une base SQLite temporaire isolée (`conftest.py`). |
+| `tests/` | Suite pytest (100 tests) : auth, posts, likes, commentaires, follow, profils, messagerie, notifications, pagination, hashtags, mentions. Chaque test tourne sur une base SQLite temporaire isolée (`conftest.py`). |
 | `pytest.ini` | Configuration pytest (répertoire des tests). |
 
-**Notifications** : chaque like, follow ou message génère une ligne dans la
-table `notifications` (voir `_create_notification` dans `app.py`), en plus
-d'un éventuel push WebSocket si le destinataire est connecté. Contrairement
-au WebSocket seul, la notification reste consultable plus tard via
-`GET /api/notifications`, même si le destinataire était hors ligne au
-moment de l'événement.
+**Notifications** : chaque like, follow, message ou mention génère une ligne
+dans la table `notifications` (voir `_create_notification` dans `app.py`),
+en plus d'un éventuel push WebSocket si le destinataire est connecté.
+Contrairement au WebSocket seul, la notification reste consultable plus
+tard via `GET /api/notifications`, même si le destinataire était hors ligne
+au moment de l'événement.
+
+**Hashtags et mentions** (voir la section "Hashtags et mentions" dans
+`app.py`) : extraits par expression régulière du texte d'un post ou
+commentaire.
+- Un `#hashtag` est indexé dans la table `post_hashtags` (indépendante du
+  moteur de recherche C : on veut un tri chronologique exact via
+  `GET /api/hashtags/{tag}`, pas un score de pertinence). Réindexé à
+  l'édition d'un post, retiré à sa suppression.
+- Une `@mention` valide (compte existant, hors auto-mention) crée une
+  notification de type `mention`, comme un like ou un follow. Éditer un post
+  ne renotifie que les mentions nouvellement ajoutées, pas celles déjà
+  présentes avant l'édition.
+
+**⚠️ Piège à connaître** : `get_conn()` ne commit **jamais** automatiquement
+à la fermeture du bloc `with` — un `conn.execute(...)` sans `conn.commit()`
+explicite est silencieusement perdu à la fermeture de la connexion (bug
+réel rencontré lors de l'ajout des hashtags : l'insertion fonctionnait dans
+les tests qui déclenchaient un commit ailleurs dans le même bloc — via une
+notification, par exemple — et échouait silencieusement sinon). Après
+chaque nouvelle écriture, vérifier qu'un `conn.commit()` la suit avant la
+fin du bloc `with`.
 
 **Flux d'une requête type** (ex: publier un post) :
 1. Le frontend envoie `POST /api/posts` avec le texte et le jeton JWT

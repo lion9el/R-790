@@ -89,7 +89,9 @@ Une fois la page ouverte, tape `help` pour voir la liste. Résumé :
 | `inbox` | liste des conversations |
 | `notifications` | voir les notifications (likes, follows, messages) |
 | `search <mots>` | recherche full-text (moteur C) |
-| `more` | voir la suite du dernier `feed` ou `search` (pagination) |
+| `hashtag <tag>` | voir les posts contenant #tag |
+| `trending` | hashtags les plus utilisés |
+| `more` | voir la suite du dernier `feed`, `search` ou `hashtag` (pagination) |
 
 ## Travailler à plusieurs sur ce projet
 
@@ -106,6 +108,8 @@ fonctionnelle (chaque état stable est aussi marqué par un tag Git, ex: `v1.0`)
 
 ## Pistes d'évolution
 
-- Notification sur les commentaires (actuellement uniquement likes/follows/messages)
+- Notification quand quelqu'un commente ton post (actuellement : likes/follows/messages/mentions)
+- Reconnexion automatique du WebSocket après une coupure
+- Blocage d'utilisateur
 - Déploiement : Postgres au lieu de SQLite pour la production,
   reverse-proxy (nginx) devant uvicorn, HTTPS
