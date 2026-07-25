@@ -254,6 +254,9 @@ const COMMANDS = {
     print("  unlike <id>                  retirer son like");
     print("  comment <id> <texte>         commenter un post");
     print("  comments <id>                voir les commentaires d'un post");
+    print("  edit <id> <texte>            modifier un de ses posts");
+    print("  delete <id>                  supprimer un de ses posts");
+    print("  delcomment <id>              supprimer un commentaire (le sien ou sur son post)");
     print("  follow <user>                suivre un utilisateur");
     print("  unfollow <user>              ne plus suivre");
     print("  profile <user>               voir un profil");
@@ -361,7 +364,33 @@ const COMMANDS = {
     if (!id) return print("usage: comments <id>", "err");
     const list = await api("GET", `/api/posts/${id}/comments`);
     if (list.length === 0) return print("Aucun commentaire.", "dim");
-    list.forEach(c => print(`  @${c.author}: ${c.content}`));
+    list.forEach(c => print(`  #${c.id} @${c.author}: ${c.content}`));
+  },
+
+  async edit(args) {
+    if (!requireAuth()) return;
+    const id = args[0];
+    const text = args.slice(1).join(" ");
+    if (!id || !text) return print("usage: edit <id> <texte>", "err");
+    const p = await api("PATCH", `/api/posts/${id}`, { content: text });
+    print("Post modifié :");
+    printHTML(fmtPost(p));
+  },
+
+  async delete(args) {
+    if (!requireAuth()) return;
+    const id = args[0];
+    if (!id) return print("usage: delete <id>", "err");
+    await api("DELETE", `/api/posts/${id}`);
+    print(`Post #${id} supprimé.`);
+  },
+
+  async delcomment(args) {
+    if (!requireAuth()) return;
+    const id = args[0];
+    if (!id) return print("usage: delcomment <id> (l'id s'affiche avec 'comments <id du post>')", "err");
+    await api("DELETE", `/api/comments/${id}`);
+    print(`Commentaire #${id} supprimé.`);
   },
 
   async follow(args) {

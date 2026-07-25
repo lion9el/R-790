@@ -78,6 +78,9 @@ Une fois la page ouverte, tape `help` pour voir la liste. Résumé :
 | `like` / `unlike <id>` | liker / retirer un like |
 | `comment <id> <texte>` | commenter |
 | `comments <id>` | lire les commentaires |
+| `edit <id> <texte>` | modifier un de ses posts |
+| `delete <id>` | supprimer un de ses posts |
+| `delcomment <id>` | supprimer un commentaire (le sien ou sur son post) |
 | `follow` / `unfollow <user>` | s'abonner / se désabonner |
 | `profile <user>` | voir un profil |
 | `msg <user> <texte>` | message privé |
