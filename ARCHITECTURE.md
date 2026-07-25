@@ -65,6 +65,13 @@ binaire dépend de l'OS et de la version de Python.
 | `realtime.py` | Registre des connexions WebSocket actives (`ConnectionManager`) ; pousse les événements "nouveau message" et "nouveau post" aux utilisateurs connectés. |
 | `uploads/` | Images jointes aux posts, stockées telles quelles sur disque (nom généré aléatoirement). Hors Git — voir `.gitignore`. |
 
+**Notifications** : chaque like, follow ou message génère une ligne dans la
+table `notifications` (voir `_create_notification` dans `app.py`), en plus
+d'un éventuel push WebSocket si le destinataire est connecté. Contrairement
+au WebSocket seul, la notification reste consultable plus tard via
+`GET /api/notifications`, même si le destinataire était hors ligne au
+moment de l'événement.
+
 **Flux d'une requête type** (ex: publier un post) :
 1. Le frontend envoie `POST /api/posts` avec le texte et le jeton JWT
 2. `app.py` vérifie le jeton via `auth.get_current_user`

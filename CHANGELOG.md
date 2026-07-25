@@ -5,6 +5,27 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
+## [Non publié] — notifications (likes, follows, messages)
+
+### Ajouté
+- Nouvelle table `notifications` (like / follow / message).
+- `GET /api/notifications` : liste les notifications de l'utilisateur
+  courant, les marque comme lues à la consultation (même principe que
+  `GET /api/messages/{username}` pour les conversations).
+- Un like, un follow ou un message génère une notification persistée en
+  base, ET un push temps réel (WebSocket, événement `{"type":
+  "notification", ...}`) si le destinataire est connecté au moment de
+  l'action. Pour les messages, pas de push dupliqué : l'événement `message`
+  déjà existant sert de signal temps réel.
+- Pas de notification en cas d'auto-like (aimer son propre post) ni de
+  double notification si on like/suit déjà.
+- Nouvelle commande terminal `notifications`.
+- Suite pytest dédiée (`backend/tests/test_notifications.py`).
+
+### Modifié
+- La suppression d'un post supprime aussi les notifications qui le
+  référencent, pour ne pas laisser de notification pointant dans le vide.
+
 ## [Non publié] — tests automatisés
 
 ### Ajouté
@@ -44,7 +65,7 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
   de compatibilité pour tout client externe qui consommerait ces routes
   directement (le frontend fourni est mis à jour en conséquence).
 
-## [Non publié] — upload d'images sur les posts
+## [v1.2] — upload d'images sur les posts
 
 ### Ajouté
 - `POST /api/posts` accepte maintenant une image optionnelle (`multipart/form-data`
