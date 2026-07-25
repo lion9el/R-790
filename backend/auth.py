@@ -2,11 +2,51 @@
 import hashlib
 import os
 import secrets
+import sys
 import time
 import jwt
 from fastapi import Header, HTTPException
 
-SECRET_KEY = os.environ.get("SOCIALNET_SECRET", "dev-secret-change-en-production")
+# Charge backend/.env s'il existe, pour que SOCIALNET_SECRET (voir
+# .env.example) soit réellement pris en compte. Avant ce correctif, .env
+# n'était lu par personne : le fichier ne servait à rien, et la valeur par
+# défaut ci-dessous (un secret FAIBLE, car visible dans le code source
+# public) était utilisée silencieusement même quand un développeur avait
+# suivi les instructions et rempli son .env.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+except ImportError:
+    pass  # python-dotenv absent : on retombe sur les vraies variables d'environnement.
+
+_PLACEHOLDER_SECRET = "change-moi-avant-la-production"
+_env_secret = os.environ.get("SOCIALNET_SECRET")
+
+if _env_secret and _env_secret != _PLACEHOLDER_SECRET:
+    SECRET_KEY = _env_secret
+else:
+    # Pas de SOCIALNET_SECRET configuré : on génère un secret aléatoire fort
+    # (32 octets, jamais prévisible ni codé en dur) plutôt que de retomber
+    # sur une valeur fixe connue de quiconque lit le code source. La
+    # contrepartie assumée : ce secret change à chaque redémarrage du
+    # process, donc tous les jetons émis avant un restart deviennent
+    # invalides — acceptable en développement, PAS en production (d'où
+    # l'avertissement explicite ci-dessous, qui doit alerter quiconque
+    # démarre le serveur sans avoir configuré .env).
+    SECRET_KEY = secrets.token_hex(32)
+    _reason = (
+        "SOCIALNET_SECRET vaut encore la valeur d'exemple de .env.example (jamais remplacée)"
+        if _env_secret == _PLACEHOLDER_SECRET
+        else "SOCIALNET_SECRET n'est pas défini"
+    )
+    print(
+        "\n"
+        f"⚠️  {_reason} : un secret aléatoire temporaire a été généré pour cette exécution.\n"
+        "    Toutes les sessions seront invalidées au prochain redémarrage du serveur.\n"
+        "    Ne JAMAIS lancer en production sans définir un vrai SOCIALNET_SECRET (voir .env.example).\n",
+        file=sys.stderr,
+    )
+
 JWT_ALGO = "HS256"
 TOKEN_LIFETIME_SECONDS = 60 * 60 * 24 * 7  # 7 jours
 
