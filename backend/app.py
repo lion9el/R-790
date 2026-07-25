@@ -9,13 +9,14 @@ import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "c_ext"))
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from database import init_db, get_conn
-from auth import hash_password, verify_password, create_token, get_current_user
+from auth import hash_password, verify_password, create_token, get_current_user, decode_token
+from realtime import manager
 
 try:
     import searchengine
@@ -53,6 +54,43 @@ def on_startup():
     with get_conn() as conn:
         for row in conn.execute("SELECT id, content FROM posts"):
             searchengine.index_add(row["id"], row["content"])
+
+
+# ---------- Temps réel (WebSocket) ----------
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket, token: str | None = None):
+    """Connexion temps réel : pousse au navigateur les nouveaux messages
+    privés reçus et les nouveaux posts des comptes suivis, sans qu'il soit
+    nécessaire de retaper une commande pour rafraîchir.
+
+    Authentification par jeton JWT passé en paramètre de l'URL
+    (ws://.../ws?token=...) plutôt qu'en en-tête HTTP classique : l'API des
+    navigateurs pour ouvrir un WebSocket ne permet pas d'y ajouter un en-tête
+    Authorization personnalisé.
+
+    Cette route ne fait que garder la connexion ouverte et écouter sa
+    fermeture ; les messages envoyés PAR le client ne sont pas traités pour
+    l'instant (le canal est actuellement à sens unique : serveur → client).
+    """
+    if not token:
+        await websocket.close(code=4401)
+        return
+    try:
+        payload = decode_token(token)
+    except Exception:
+        await websocket.close(code=4401)
+        return
+
+    user_id = int(payload["sub"])
+    await manager.connect(user_id, websocket)
+    try:
+        while True:
+            # On ne fait rien du contenu reçu : cette boucle sert uniquement
+            # à détecter la déconnexion (fermeture d'onglet, perte réseau).
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(user_id, websocket)
 
 
 # ---------- Schémas ----------
@@ -165,11 +203,13 @@ def _serialize_post(conn, row, current_user_id):
 
 
 @app.post("/api/posts")
-def create_post(body: PostIn, user=Depends(get_current_user)):
+async def create_post(body: PostIn, user=Depends(get_current_user)):
     """Publie un nouveau post pour l'utilisateur connecté.
 
     Insère en base ET indexe le texte dans le moteur de recherche C dans la
     même opération : un post créé est immédiatement trouvable par `search`.
+    Notifie aussi en temps réel (WebSocket) les followers actuellement
+    connectés, pour que leur fil se mette à jour sans action de leur part.
     """
     with get_conn() as conn:
         cur = conn.execute(
@@ -180,7 +220,14 @@ def create_post(body: PostIn, user=Depends(get_current_user)):
         post_id = cur.lastrowid
         searchengine.index_add(post_id, body.content)
         row = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
-        return _serialize_post(conn, row, user["id"])
+        serialized = _serialize_post(conn, row, user["id"])
+        follower_ids = [
+            r["follower_id"]
+            for r in conn.execute("SELECT follower_id FROM follows WHERE followed_id = ?", (user["id"],))
+        ]
+
+    await manager.broadcast_to_users(follower_ids, {"type": "new_post", "post": serialized})
+    return serialized
 
 
 @app.get("/api/feed")
@@ -336,18 +383,30 @@ def get_user_profile(username: str, user=Depends(get_current_user)):
 # ---------- Messagerie privée ----------
 
 @app.post("/api/messages")
-def send_message(body: MessageIn, user=Depends(get_current_user)):
-    """Envoie un message privé de l'utilisateur courant vers `body.to`."""
+async def send_message(body: MessageIn, user=Depends(get_current_user)):
+    """Envoie un message privé de l'utilisateur courant vers `body.to`.
+
+    Pousse aussi le message en temps réel (WebSocket) si le destinataire est
+    connecté ; sinon il le verra en rouvrant la conversation plus tard via
+    GET /api/messages/{username}, comme d'habitude.
+    """
+    sent_at = now()
     with get_conn() as conn:
         target = conn.execute("SELECT id FROM users WHERE username = ?", (body.to,)).fetchone()
         if not target:
             raise HTTPException(status_code=404, detail="Destinataire introuvable.")
         conn.execute(
             "INSERT INTO messages (sender_id, receiver_id, content, created_at) VALUES (?, ?, ?, ?)",
-            (user["id"], target["id"], body.content, now()),
+            (user["id"], target["id"], body.content, sent_at),
         )
         conn.commit()
-        return {"ok": True}
+        target_id = target["id"]
+
+    await manager.send_to_user(
+        target_id,
+        {"type": "message", "from": user["username"], "content": body.content, "created_at": sent_at},
+    )
+    return {"ok": True}
 
 
 @app.get("/api/messages/{username}")

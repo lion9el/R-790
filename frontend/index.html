@@ -119,6 +119,39 @@ function updateHeader() {
 }
 updateHeader();
 
+// ---------- Temps réel (WebSocket) ----------
+// Une seule connexion WebSocket, ouverte après login/register, fermée au
+// logout. Le serveur y pousse deux types d'événements : "message" (message
+// privé reçu) et "new_post" (nouveau post d'un compte suivi). Voir
+// backend/realtime.py et la route /ws dans backend/app.py.
+let socket = null;
+
+function connectRealtime() {
+  if (!token) return;
+  if (socket) { try { socket.close(); } catch (e) {} }
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  socket = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+
+  socket.onmessage = (event) => {
+    let data;
+    try { data = JSON.parse(event.data); } catch (e) { return; }
+    if (data.type === "message") {
+      print(`💬 [temps réel] message de @${data.from}: ${data.content}`, "dim");
+    } else if (data.type === "new_post") {
+      print(`📰 [temps réel] nouveau post de @${data.post.author} — tape 'feed' pour le voir`, "dim");
+    }
+  };
+  // Pas de reconnexion automatique pour l'instant : une perte de connexion
+  // (ex: veille du PC) nécessite de retaper 'login'. Limitation connue,
+  // voir CHANGELOG.md.
+}
+
+function disconnectRealtime() {
+  if (socket) { try { socket.close(); } catch (e) {} socket = null; }
+}
+
+if (token) connectRealtime();
+
 function banner() {
   print("═══════════════════════════════════════════════");
   print("  SOCIALNET v1.0 — interface terminal");
@@ -201,6 +234,7 @@ const COMMANDS = {
     token = data.token; username = data.username;
     localStorage.setItem("sn_token", token); localStorage.setItem("sn_username", username);
     updateHeader();
+    connectRealtime();
     print(`Compte créé. Bienvenue @${username} !`);
   },
 
@@ -211,12 +245,14 @@ const COMMANDS = {
     token = data.token; username = data.username;
     localStorage.setItem("sn_token", token); localStorage.setItem("sn_username", username);
     updateHeader();
+    connectRealtime();
     print(`Connecté en tant que @${username}.`);
   },
 
   logout() {
     token = null; username = null;
     localStorage.removeItem("sn_token"); localStorage.removeItem("sn_username");
+    disconnectRealtime();
     updateHeader();
     print("Déconnecté.");
   },

@@ -5,6 +5,23 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
+## [Non publié] — messagerie et fil en temps réel
+
+### Ajouté
+- Connexion WebSocket (`GET /ws?token=...`) authentifiée par jeton JWT.
+- `backend/realtime.py` : registre des connexions actives (`ConnectionManager`).
+- Les messages privés sont poussés instantanément au destinataire s'il est
+  connecté (événement `{"type": "message", ...}`).
+- Les nouveaux posts sont poussés instantanément aux abonnés connectés
+  (événement `{"type": "new_post", ...}`).
+- Le frontend ouvre automatiquement la connexion temps réel après
+  login/register, et l'affiche dans le terminal avec le préfixe
+  `[temps réel]`.
+
+### Connu — limitation
+- Pas de reconnexion automatique du WebSocket en cas de coupure (il faut
+  refaire `login`). À traiter dans une prochaine évolution si besoin.
+
 ## [v1.0] — 2026-07-25
 
 Première version stable et fonctionnelle du projet.

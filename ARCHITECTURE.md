@@ -58,17 +58,31 @@ binaire dépend de l'OS et de la version de Python.
 
 | Fichier | Rôle |
 |---|---|
-| `app.py` | Toutes les routes HTTP. Point d'entrée de l'application. |
+| `app.py` | Toutes les routes HTTP + la route WebSocket `/ws`. Point d'entrée de l'application. |
 | `auth.py` | Hachage de mot de passe (PBKDF2) et jetons de session (JWT). |
 | `database.py` | Ouverture de connexion SQLite, création des tables. |
 | `schema.sql` | Définition des tables (users, posts, likes, comments, follows, messages). |
+| `realtime.py` | Registre des connexions WebSocket actives (`ConnectionManager`) ; pousse les événements "nouveau message" et "nouveau post" aux utilisateurs connectés. |
 
 **Flux d'une requête type** (ex: publier un post) :
 1. Le frontend envoie `POST /api/posts` avec le texte et le jeton JWT
 2. `app.py` vérifie le jeton via `auth.get_current_user`
 3. `app.py` insère le post en base via `database.get_conn()`
 4. `app.py` appelle `searchengine.index_add()` pour indexer le nouveau texte
-5. La réponse JSON est renvoyée au frontend
+5. `app.py` récupère la liste des abonnés (followers) et appelle
+   `realtime.manager.broadcast_to_users()` pour les notifier en direct
+6. La réponse JSON est renvoyée au frontend qui a fait la requête
+
+**Flux temps réel (WebSocket)** :
+1. Après login/register, le frontend ouvre `ws://.../ws?token=<jwt>`
+2. `app.py` vérifie le jeton (`auth.decode_token`) et enregistre la
+   connexion dans `realtime.manager`
+3. Quand quelqu'un publie un post ou envoie un message privé, la route HTTP
+   correspondante appelle `manager.send_to_user()` / `broadcast_to_users()`
+4. Si le destinataire a un onglet ouvert, il reçoit l'événement JSON
+   instantanément ; sinon, rien ne se perd — il le verra en rafraîchissant
+   (`feed`, `conv <user>`) comme avant. Le WebSocket est un "plus", pas un
+   remplacement du fonctionnement classique par requêtes HTTP.
 
 ### `frontend/` — interface terminal
 
