@@ -260,6 +260,7 @@ const COMMANDS = {
     print("  follow <user>                suivre un utilisateur");
     print("  unfollow <user>              ne plus suivre");
     print("  profile <user>               voir un profil");
+    print("  bio <texte>                  changer sa bio (sans texte : l'effacer)");
     print("  msg <user> <texte>           envoyer un message privé");
     print("  conv <user>                  voir une conversation");
     print("  inbox                        liste des conversations");
@@ -417,6 +418,13 @@ const COMMANDS = {
     print(`@${p.username}`);
     print(`  bio: ${p.bio || "(vide)"}`);
     print(`  ${p.posts} posts · ${p.followers} followers · ${p.following} suivis`);
+  },
+
+  async bio(args) {
+    if (!requireAuth()) return;
+    const text = args.join(" ");
+    const p = await api("PATCH", "/api/me", { bio: text });
+    print(p.bio ? `Bio mise à jour : ${p.bio}` : "Bio effacée.");
   },
 
   async msg(args) {

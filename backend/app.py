@@ -162,6 +162,11 @@ class LoginIn(BaseModel):
     password: str
 
 
+class ProfileIn(BaseModel):
+    """Corps attendu pour PATCH /api/me (modification de son propre profil)."""
+    bio: str = Field(max_length=200)
+
+
 class PostIn(BaseModel):
     """Conservé pour référence/documentation : POST /api/posts n'utilise
     plus ce schéma JSON directement depuis l'ajout de l'upload d'image, car
@@ -228,6 +233,18 @@ def login(body: LoginIn):
         raise HTTPException(status_code=401, detail="Identifiants incorrects.")
     token = create_token(row["id"], row["username"])
     return {"token": token, "username": row["username"]}
+
+
+# ---------- Profil de l'utilisateur connecté ----------
+
+@app.patch("/api/me")
+def update_profile(body: ProfileIn, user=Depends(get_current_user)):
+    """Modifie le profil de l'utilisateur connecté (bio uniquement pour
+    l'instant). Renvoie le profil à jour."""
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET bio = ? WHERE id = ?", (body.bio, user["id"]))
+        conn.commit()
+    return {"username": user["username"], "bio": body.bio}
 
 
 # ---------- Posts / fil d'actualité ----------
