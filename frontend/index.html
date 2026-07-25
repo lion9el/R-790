@@ -355,7 +355,8 @@ const COMMANDS = {
     print("Commandes disponibles :", "dim");
     print("  register <user> <mdp>        créer un compte");
     print("  login <user> <mdp>           se connecter");
-    print("  logout                       se déconnecter");
+    print("  logout                       se déconnecter (cet appareil)");
+    print("  logout-all                   se déconnecter de tous les appareils");
     print("  whoami                       afficher l'utilisateur courant");
     print("  post <texte>                 publier un post");
     print("  postimg <texte>              publier un post avec une image jointe");
@@ -404,12 +405,42 @@ const COMMANDS = {
     print(`Connecté en tant que @${username}.`);
   },
 
-  logout() {
+  async logout() {
+    // Révoque le jeton côté serveur AVANT de le supprimer localement (voir
+    // POST /api/logout, backend/app.py) : sans cet appel, "se déconnecter"
+    // ne faisait qu'oublier le jeton dans ce navigateur, mais il restait
+    // valable jusqu'à son expiration naturelle (7 jours) si quelqu'un
+    // d'autre l'avait récupéré entre-temps (poste partagé, XSS...).
+    if (token) {
+      try { await api("POST", "/api/logout"); }
+      catch (e) { /* le jeton est peut-être déjà expiré/révoqué : pas grave, on nettoie quand même */ }
+    }
+    intentionalDisconnect = true;
     token = null; username = null;
     localStorage.removeItem("sn_token"); localStorage.removeItem("sn_username");
     disconnectRealtime();
     updateHeader();
     print("Déconnecté.");
+  },
+
+  async "logout-all"() {
+    // Révoque TOUS les jetons émis jusqu'ici pour ce compte (tous les
+    // appareils/navigateurs connectés), pas seulement celui-ci. Utile si on
+    // soupçonne qu'un jeton a fuité sans savoir lequel précisément (voir
+    // POST /api/logout/all, backend/app.py).
+    if (!requireAuth()) return;
+    try {
+      await api("POST", "/api/logout/all");
+    } catch (e) {
+      print(`Erreur : ${e.message}`, "err");
+      return;
+    }
+    intentionalDisconnect = true;
+    token = null; username = null;
+    localStorage.removeItem("sn_token"); localStorage.removeItem("sn_username");
+    disconnectRealtime();
+    updateHeader();
+    print("Déconnecté de tous les appareils.");
   },
 
   whoami() {
