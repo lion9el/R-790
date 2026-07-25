@@ -4,6 +4,7 @@ import os
 import secrets
 import sys
 import time
+import uuid
 import jwt
 from fastapi import Header, HTTPException
 
@@ -65,10 +66,29 @@ def verify_password(password: str, salt: str, expected_hash: str) -> bool:
 
 
 def create_token(user_id: int, username: str) -> str:
+    t = time.time()
     payload = {
         "sub": str(user_id),
         "username": username,
-        "exp": int(time.time()) + TOKEN_LIFETIME_SECONDS,
+        "iat": int(t),  # standard JWT ("issued at"), résolution seconde
+        # Même horodatage d'émission, mais en MILLISECONDES : sert
+        # uniquement à comparer l'ordre de deux jetons de façon fiable pour
+        # la révocation globale (voir app.py::logout_all et
+        # _reject_if_revoked). Avec une résolution seconde seule, deux
+        # jetons émis pendant la même seconde (ex: un test automatisé qui
+        # enchaîne login → logout_all → login en quelques millisecondes)
+        # deviendraient indiscernables, et le second login se ferait
+        # révoquer par erreur alors qu'il a eu lieu APRÈS la déconnexion
+        # globale. La résolution milliseconde rend cette collision
+        # négligeable en pratique (chaque appel HTTP/SQLite prend >>1ms).
+        "iat_ms": int(t * 1000),
+        "exp": int(t) + TOKEN_LIFETIME_SECONDS,
+        # Identifiant unique de CE jeton précis (une "session") : sert à la
+        # révocation individuelle (voir app.py logout / table revoked_tokens).
+        # Sans lui, il n'y aurait aucun moyen de désigner un jeton précis à
+        # invalider — deux jetons émis à la même seconde pour le même
+        # utilisateur seraient indiscernables.
+        "jti": uuid.uuid4().hex,
     }
     return jwt.encode(payload, SECRET_KEY, algorithm=JWT_ALGO)
 
@@ -83,9 +103,23 @@ def decode_token(token: str) -> dict:
 
 
 def get_current_user(authorization: str = Header(default=None)) -> dict:
-    """Dépendance FastAPI : extrait l'utilisateur depuis l'en-tête Authorization: Bearer <token>."""
+    """Dépendance FastAPI : extrait l'utilisateur depuis l'en-tête Authorization: Bearer <token>.
+
+    Ne vérifie QUE la signature et l'expiration du jeton (via decode_token) —
+    pas la révocation, qui nécessite un accès à la base de données et est
+    donc appliquée par-dessus dans app.py (voir get_current_user là-bas, qui
+    enveloppe celle-ci). Ce module reste volontairement sans dépendance à
+    `database`, pour garder l'authentification "pure" testable isolément.
+    """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Non authentifié. Connecte-toi d'abord (commande: login).")
     token = authorization.removeprefix("Bearer ").strip()
     payload = decode_token(token)
-    return {"id": int(payload["sub"]), "username": payload["username"]}
+    return {
+        "id": int(payload["sub"]),
+        "username": payload["username"],
+        "jti": payload["jti"],
+        "iat": payload["iat"],
+        "iat_ms": payload["iat_ms"],
+        "exp": payload["exp"],
+    }
