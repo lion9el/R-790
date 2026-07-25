@@ -5,6 +5,25 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
+## [Non publié] — pagination du fil et de la recherche
+
+### Ajouté
+- `GET /api/feed` accepte `before=<post_id>` : pagination par curseur (id
+  décroissant), robuste aux nouveaux posts publiés entre deux pages,
+  contrairement à un offset classique. Réponse désormais sous la forme
+  `{"posts": [...], "has_more": bool, "next_cursor": id|null}`.
+- `GET /api/search` accepte `limit` (≤ 50) et `offset` : pagination classique,
+  car l'extension C trie par score et non par id. Réponse sous la forme
+  `{"results": [...], "has_more": bool, "next_offset": int|null}`.
+- Nouvelle commande terminal `more` : continue la pagination du dernier
+  `feed` ou `search` lancé.
+
+### Modifié
+- Réponses de `/api/feed` et `/api/search` : ce ne sont plus des tableaux
+  bruts mais des objets enveloppant les résultats (voir ci-dessus). Rupture
+  de compatibilité pour tout client externe qui consommerait ces routes
+  directement (le frontend fourni est mis à jour en conséquence).
+
 ## [Non publié] — upload d'images sur les posts
 
 ### Ajouté
