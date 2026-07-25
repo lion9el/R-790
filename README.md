@@ -80,6 +80,7 @@ Une fois la page ouverte, tape `help` pour voir la liste. Résumé :
 | `comments <id>` | lire les commentaires |
 | `follow` / `unfollow <user>` | s'abonner / se désabonner |
 | `profile <user>` | voir un profil |
+| `bio <texte>` | changer sa bio (sans texte : l'effacer) |
 | `msg <user> <texte>` | message privé |
 | `conv <user>` | lire une conversation |
 | `inbox` | liste des conversations |

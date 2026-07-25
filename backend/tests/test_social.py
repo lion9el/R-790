@@ -137,3 +137,38 @@ def test_inbox_empty_when_no_messages(client, register):
     headers, _ = register("alice")
     resp = client.get("/api/inbox", headers=headers)
     assert resp.json() == []
+
+
+# ---------- Bio ----------
+
+def test_update_own_bio(client, register):
+    headers, _ = register("alice")
+    resp = client.patch("/api/me", json={"bio": "j'aime le C"}, headers=headers)
+    assert resp.status_code == 200
+    profile = client.get("/api/users/alice", headers=headers).json()
+    assert profile["bio"] == "j'aime le C"
+
+
+def test_bio_visible_by_other_users(client, register):
+    alice_headers, _ = register("alice")
+    bob_headers, _ = register("bob")
+    client.patch("/api/me", json={"bio": "salut"}, headers=alice_headers)
+    profile = client.get("/api/users/alice", headers=bob_headers).json()
+    assert profile["bio"] == "salut"
+
+
+def test_bio_can_be_cleared(client, register):
+    headers, _ = register("alice")
+    client.patch("/api/me", json={"bio": "temporaire"}, headers=headers)
+    client.patch("/api/me", json={"bio": ""}, headers=headers)
+    assert client.get("/api/users/alice", headers=headers).json()["bio"] == ""
+
+
+def test_bio_too_long_rejected(client, register):
+    headers, _ = register("alice")
+    resp = client.patch("/api/me", json={"bio": "x" * 201}, headers=headers)
+    assert resp.status_code == 422
+
+
+def test_bio_requires_authentication(client):
+    assert client.patch("/api/me", json={"bio": "anonyme"}).status_code == 401
