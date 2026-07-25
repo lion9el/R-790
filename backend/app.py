@@ -7,6 +7,7 @@ import sys
 import os
 import datetime
 import uuid
+from contextlib import asynccontextmanager
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "c_ext"))
 
@@ -27,7 +28,26 @@ except ImportError:
         "Compile-le avec : cd c_ext && python3 setup.py build_ext --inplace"
     )
 
-app = FastAPI(title="Réseau social terminal")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Exécuté une fois au démarrage du serveur (avant la première requête).
+
+    Deux choses à faire avant que l'API soit utilisable :
+    1. Créer les tables SQLite si elles n'existent pas encore (init_db).
+    2. Reconstruire l'index de recherche en mémoire (l'extension C ne
+       persiste rien sur disque : à chaque redémarrage du serveur, on relit
+       tous les posts existants et on les réindexe un par un).
+    """
+    init_db()
+    searchengine.clear()
+    with get_conn() as conn:
+        for row in conn.execute("SELECT id, content FROM posts"):
+            searchengine.index_add(row["id"], row["content"])
+    yield
+
+
+app = FastAPI(title="Réseau social terminal", lifespan=lifespan)
 
 # ---------- Stockage des images jointes aux posts ----------
 # Les fichiers uploadés sont stockés tels quels sur disque (pas en base),
@@ -84,24 +104,7 @@ def now() -> str:
     commentaires, messages, follows) afin de garder une référence commune
     indépendante du fuseau horaire de chaque utilisateur.
     """
-    return datetime.datetime.utcnow().isoformat()
-
-
-@app.on_event("startup")
-def on_startup():
-    """Exécuté une fois au démarrage du serveur (avant la première requête).
-
-    Deux choses à faire avant que l'API soit utilisable :
-    1. Créer les tables SQLite si elles n'existent pas encore (init_db).
-    2. Reconstruire l'index de recherche en mémoire (l'extension C ne
-       persiste rien sur disque : à chaque redémarrage du serveur, on relit
-       tous les posts existants et on les réindexe un par un).
-    """
-    init_db()
-    searchengine.clear()
-    with get_conn() as conn:
-        for row in conn.execute("SELECT id, content FROM posts"):
-            searchengine.index_add(row["id"], row["content"])
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat()
 
 
 # ---------- Temps réel (WebSocket) ----------
@@ -249,32 +252,74 @@ def update_profile(body: ProfileIn, user=Depends(get_current_user)):
 
 # ---------- Posts / fil d'actualité ----------
 
-def _serialize_post(conn, row, current_user_id):
-    """Transforme une ligne SQL `posts` en dict JSON prêt à renvoyer à l'API.
+def _serialize_posts(conn, rows, current_user_id):
+    """Transforme des lignes SQL `posts` en dicts JSON prêts pour l'API.
 
-    Fait 3 requêtes supplémentaires (nombre de likes, si l'utilisateur
-    courant a liké, nombre de commentaires) : acceptable au vu du volume
-    actuel, mais à revoir avec des JOIN/sous-requêtes si le fil devient lent
-    à grande échelle. Le préfixe `_` indique que cette fonction est un détail
+    Les compteurs (likes, commentaires), l'auteur et le fait que
+    l'utilisateur courant ait liké sont récupérés pour TOUS les posts de la
+    page en une poignée de requêtes groupées, au lieu d'une série de
+    requêtes par post (problème du "N+1" : un fil de 30 posts coûtait 120
+    allers-retours en base). Le préfixe `_` indique un détail
     d'implémentation interne à ce fichier, pas une route API.
     """
-    likes = conn.execute("SELECT COUNT(*) c FROM likes WHERE post_id = ?", (row["id"],)).fetchone()["c"]
-    liked = conn.execute(
-        "SELECT 1 FROM likes WHERE post_id = ? AND user_id = ?", (row["id"], current_user_id)
-    ).fetchone() is not None
-    comment_count = conn.execute("SELECT COUNT(*) c FROM comments WHERE post_id = ?", (row["id"],)).fetchone()["c"]
-    author = conn.execute("SELECT username FROM users WHERE id = ?", (row["user_id"],)).fetchone()["username"]
-    image_path = row["image_path"] if "image_path" in row.keys() else None
-    return {
-        "id": row["id"],
-        "author": author,
-        "content": row["content"],
-        "created_at": row["created_at"],
-        "likes": likes,
-        "liked_by_me": liked,
-        "comments": comment_count,
-        "image_url": f"/uploads/{image_path}" if image_path else None,
+    rows = list(rows)
+    if not rows:
+        return []
+
+    post_ids = [row["id"] for row in rows]
+    placeholders = ",".join("?" * len(post_ids))
+
+    like_counts = {
+        r["post_id"]: r["c"]
+        for r in conn.execute(
+            f"SELECT post_id, COUNT(*) c FROM likes WHERE post_id IN ({placeholders}) GROUP BY post_id",
+            post_ids,
+        )
     }
+    comment_counts = {
+        r["post_id"]: r["c"]
+        for r in conn.execute(
+            f"SELECT post_id, COUNT(*) c FROM comments WHERE post_id IN ({placeholders}) GROUP BY post_id",
+            post_ids,
+        )
+    }
+    liked_by_me = {
+        r["post_id"]
+        for r in conn.execute(
+            f"SELECT post_id FROM likes WHERE user_id = ? AND post_id IN ({placeholders})",
+            [current_user_id, *post_ids],
+        )
+    }
+    author_ids = list({row["user_id"] for row in rows})
+    authors = {
+        r["id"]: r["username"]
+        for r in conn.execute(
+            f"SELECT id, username FROM users WHERE id IN ({','.join('?' * len(author_ids))})",
+            author_ids,
+        )
+    }
+
+    serialized = []
+    for row in rows:
+        image_path = row["image_path"] if "image_path" in row.keys() else None
+        serialized.append(
+            {
+                "id": row["id"],
+                "author": authors[row["user_id"]],
+                "content": row["content"],
+                "created_at": row["created_at"],
+                "likes": like_counts.get(row["id"], 0),
+                "liked_by_me": row["id"] in liked_by_me,
+                "comments": comment_counts.get(row["id"], 0),
+                "image_url": f"/uploads/{image_path}" if image_path else None,
+            }
+        )
+    return serialized
+
+
+def _serialize_post(conn, row, current_user_id):
+    """Version à un seul post de `_serialize_posts`."""
+    return _serialize_posts(conn, [row], current_user_id)[0]
 
 
 @app.post("/api/posts")
@@ -357,7 +402,7 @@ def feed(limit: int = 30, before: int | None = None, user=Depends(get_current_us
         ).fetchall()
         has_more = len(rows) > limit
         rows = rows[:limit]
-        posts = [_serialize_post(conn, r, user["id"]) for r in rows]
+        posts = _serialize_posts(conn, rows, user["id"])
         next_cursor = rows[-1]["id"] if has_more and rows else None
         return {"posts": posts, "has_more": has_more, "next_cursor": next_cursor}
 
@@ -375,14 +420,11 @@ def like_post(post_id: int, user=Depends(get_current_user)):
         post = conn.execute("SELECT id FROM posts WHERE id = ?", (post_id,)).fetchone()
         if not post:
             raise HTTPException(status_code=404, detail="Post introuvable.")
-        try:
-            conn.execute(
-                "INSERT INTO likes (post_id, user_id, created_at) VALUES (?, ?, ?)",
-                (post_id, user["id"], now()),
-            )
-            conn.commit()
-        except Exception:
-            pass  # déjà liké, on ignore
+        conn.execute(
+            "INSERT OR IGNORE INTO likes (post_id, user_id, created_at) VALUES (?, ?, ?)",
+            (post_id, user["id"], now()),
+        )
+        conn.commit()
         return {"ok": True}
 
 
@@ -535,14 +577,11 @@ def follow_user(username: str, user=Depends(get_current_user)):
             raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
         if target["id"] == user["id"]:
             raise HTTPException(status_code=400, detail="Tu ne peux pas te suivre toi-même.")
-        try:
-            conn.execute(
-                "INSERT INTO follows (follower_id, followed_id, created_at) VALUES (?, ?, ?)",
-                (user["id"], target["id"], now()),
-            )
-            conn.commit()
-        except Exception:
-            pass
+        conn.execute(
+            "INSERT OR IGNORE INTO follows (follower_id, followed_id, created_at) VALUES (?, ?, ?)",
+            (user["id"], target["id"], now()),
+        )
+        conn.commit()
         return {"ok": True}
 
 

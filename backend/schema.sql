@@ -61,3 +61,9 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_posts_user ON posts(user_id);
 CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id);
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(sender_id, receiver_id);
+-- Le fil d'actualité lit les abonnements d'un utilisateur (follower_id) et
+-- la sérialisation des posts lit les likes d'un utilisateur (user_id) : sans
+-- ces index, SQLite parcourt toute la table (la clé primaire composite ne
+-- sert que si la première colonne est filtrée).
+CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower_id);
+CREATE INDEX IF NOT EXISTS idx_likes_user ON likes(user_id);
