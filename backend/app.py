@@ -298,25 +298,46 @@ async def create_post(
 
 
 @app.get("/api/feed")
-def feed(limit: int = 30, user=Depends(get_current_user)):
-    """Fil d'actualité : posts de l'utilisateur courant + posts des comptes
-    qu'il suit, triés du plus récent au plus ancien.
+def feed(limit: int = 30, before: int | None = None, user=Depends(get_current_user)):
+    """Fil d'actualité paginé : posts de l'utilisateur courant + posts des
+    comptes qu'il suit, triés du plus récent au plus ancien.
 
-    `limit` plafonne le nombre de posts renvoyés (pas de pagination réelle
-    pour l'instant, voir CHANGELOG.md pour les limitations connues).
+    Pagination par curseur (`before`) plutôt que par offset : on demande "les
+    posts dont l'id est strictement inférieur à `before`". Comme `id` est
+    auto-incrémenté et donc strictement croissant avec le temps d'insertion,
+    trier/filtrer sur `id` donne le même ordre que trier sur `created_at`,
+    sans les soucis d'un offset classique (un post publié par quelqu'un
+    d'autre pendant qu'on parcourt les pages ne décale pas les résultats
+    suivants, contrairement à `OFFSET n` qui recompte depuis le début à
+    chaque appel).
+
+    `limit` est plafonné à 100 pour éviter qu'un client n'en demande trop
+    d'un coup. On sélectionne `limit + 1` lignes pour savoir s'il reste des
+    posts au-delà de cette page (`has_more`) sans avoir à faire un second
+    aller-retour en base juste pour un COUNT.
+
+    Réponse : {"posts": [...], "has_more": bool, "next_cursor": id|null}
+    `next_cursor` est à repasser dans `before` pour demander la page
+    suivante ; `null` quand il n'y a plus rien après cette page.
     """
+    limit = max(1, min(limit, 100))
     with get_conn() as conn:
         rows = conn.execute(
             """
             SELECT p.* FROM posts p
-            WHERE p.user_id = ?
-               OR p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)
-            ORDER BY p.created_at DESC
+            WHERE (p.user_id = ?
+               OR p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?))
+              AND (? IS NULL OR p.id < ?)
+            ORDER BY p.id DESC
             LIMIT ?
             """,
-            (user["id"], user["id"], limit),
+            (user["id"], user["id"], before, before, limit + 1),
         ).fetchall()
-        return [_serialize_post(conn, r, user["id"]) for r in rows]
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        posts = [_serialize_post(conn, r, user["id"]) for r in rows]
+        next_cursor = rows[-1]["id"] if has_more and rows else None
+        return {"posts": posts, "has_more": has_more, "next_cursor": next_cursor}
 
 
 @app.post("/api/posts/{post_id}/like")
@@ -532,26 +553,44 @@ def inbox(user=Depends(get_current_user)):
 # ---------- Recherche (utilise l'extension C) ----------
 
 @app.get("/api/search")
-def search(q: str, user=Depends(get_current_user)):
-    """Recherche full-text dans les posts via l'extension C (searchengine).
+def search(q: str, limit: int = 20, offset: int = 0, user=Depends(get_current_user)):
+    """Recherche full-text paginée dans les posts via l'extension C (searchengine).
 
-    `searchengine.search` renvoie des `(doc_id, score)` triés par score
-    décroissant (score = nombre total d'occurrences des mots recherchés
-    dans le post). On récupère ensuite chaque post correspondant en base et
-    on ajoute le score dans la réponse pour que le frontend puisse l'afficher.
+    `searchengine.search` trie par score (nombre d'occurrences des mots
+    recherchés), pas par id ni par date : un curseur façon `feed` n'a donc
+    pas de sens ici, un simple offset/limit classique convient.
+
+    L'extension C ne connaît pas la notion d'offset (voir `c_ext/searchmodule.c`
+    : `search(query, limit)` renvoie déjà ses `limit` meilleurs résultats).
+    On lui demande donc `offset + limit + 1` résultats, puis on découpe la
+    tranche voulue côté Python : le "+1" sert uniquement à savoir s'il reste
+    des résultats au-delà de cette page (`has_more`), sans requête séparée.
+
+    Réponse : {"results": [...], "has_more": bool, "next_offset": int|null}
     """
-    results = searchengine.search(q, 20)
-    if not results:
-        return []
+    limit = max(1, min(limit, 50))
+    offset = max(0, offset)
+
+    raw_results = searchengine.search(q, offset + limit + 1)
+    has_more = len(raw_results) > offset + limit
+    page = raw_results[offset:offset + limit]
+
+    if not page:
+        return {"results": [], "has_more": False, "next_offset": None}
+
     with get_conn() as conn:
         out = []
-        for doc_id, score in results:
+        for doc_id, score in page:
             row = conn.execute("SELECT * FROM posts WHERE id = ?", (doc_id,)).fetchone()
             if row:
                 serialized = _serialize_post(conn, row, user["id"])
                 serialized["score"] = score
                 out.append(serialized)
-        return out
+        return {
+            "results": out,
+            "has_more": has_more,
+            "next_offset": offset + limit if has_more else None,
+        }
 
 
 # ---------- Frontend statique (interface terminal) ----------
