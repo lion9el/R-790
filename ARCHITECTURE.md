@@ -54,6 +54,9 @@ Ce document explique comment les différentes parties du projet s'articulent.
 `.gitignore`). Chaque personne le recompile localement avec `run.sh` — le
 binaire dépend de l'OS et de la version de Python.
 
+`c_ext/tests/` contient une suite pytest (16 tests) indépendante du backend :
+indexation, scoring, tri, pagination, suppression, isolation entre tests.
+
 ### `backend/` — API Python (FastAPI)
 
 | Fichier | Rôle |
@@ -64,6 +67,8 @@ binaire dépend de l'OS et de la version de Python.
 | `schema.sql` | Définition des tables (users, posts, likes, comments, follows, messages). |
 | `realtime.py` | Registre des connexions WebSocket actives (`ConnectionManager`) ; pousse les événements "nouveau message" et "nouveau post" aux utilisateurs connectés. |
 | `uploads/` | Images jointes aux posts, stockées telles quelles sur disque (nom généré aléatoirement). Hors Git — voir `.gitignore`. |
+| `tests/` | Suite pytest (83 tests) : auth, posts, likes, commentaires, follow, profils, messagerie, notifications, pagination. Chaque test tourne sur une base SQLite temporaire isolée (`conftest.py`). |
+| `pytest.ini` | Configuration pytest (répertoire des tests). |
 
 **Notifications** : chaque like, follow ou message génère une ligne dans la
 table `notifications` (voir `_create_notification` dans `app.py`), en plus
@@ -103,6 +108,13 @@ fonction qui appelle l'API puis affiche le résultat.
 `COMMANDS` de `index.html`, et si besoin la route correspondante côté
 `backend/app.py`.
 
+## Intégration continue
+
+`.github/workflows/tests.yml` s'exécute automatiquement à chaque push sur
+`main` et à chaque pull request : il compile l'extension C puis lance les
+deux suites de tests (`c_ext/tests/`, `backend/tests/`). Une pull request
+avec des tests en échec est visible directement sur GitHub avant fusion.
+
 ## Où toucher pour une modification courante
 
 | Je veux... | Je modifie... |
@@ -112,3 +124,4 @@ fonction qui appelle l'API puis affiche le résultat.
 | Ajouter une commande terminal | `frontend/index.html` (objet `COMMANDS`) + route API si besoin |
 | Changer l'algorithme de recherche/scoring | `c_ext/searchmodule.c` (recompiler ensuite) |
 | Changer le style visuel du terminal | `frontend/index.html` (bloc `<style>`) |
+| Vérifier que rien n'est cassé | `cd backend && python3 -m pytest -q` et `cd c_ext && python3 -m pytest -q` |

@@ -5,65 +5,49 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
-## [Non publié] — notifications (likes, follows, messages)
+## [v1.3] — 2026-07-25 — édition de profil, édition/suppression de posts, notifications, pagination, tests, CI
+
+Version consolidant plusieurs évolutions développées en parallèle par
+l'équipe (dont une contribution de Devin) et fusionnées sur `main`.
 
 ### Ajouté
-- Nouvelle table `notifications` (like / follow / message).
-- `GET /api/notifications` : liste les notifications de l'utilisateur
-  courant, les marque comme lues à la consultation (même principe que
-  `GET /api/messages/{username}` pour les conversations).
-- Un like, un follow ou un message génère une notification persistée en
-  base, ET un push temps réel (WebSocket, événement `{"type":
-  "notification", ...}`) si le destinataire est connecté au moment de
-  l'action. Pour les messages, pas de push dupliqué : l'événement `message`
-  déjà existant sert de signal temps réel.
-- Pas de notification en cas d'auto-like (aimer son propre post) ni de
-  double notification si on like/suit déjà.
-- Nouvelle commande terminal `notifications`.
-- Suite pytest dédiée (`backend/tests/test_notifications.py`).
+- **Notifications** (like / follow / message) : nouvelle table
+  `notifications`, `GET /api/notifications`, push temps réel en plus de la
+  persistance, commande terminal `notifications`. Aucune notification pour
+  un auto-like ni de doublon si déjà liké/suivi.
+- **Édition et suppression de posts et commentaires** :
+  `PATCH /api/posts/{id}`, `DELETE /api/posts/{id}`,
+  `DELETE /api/comments/{id}`. La suppression d'un post désindexe aussi son
+  contenu du moteur de recherche C et supprime les notifications qui le
+  référençaient, pour ne rien laisser pointer dans le vide.
+- **Profil modifiable** : `PATCH /api/me` (bio, 200 caractères max).
+- **Pagination** :
+  - `GET /api/feed?before=<post_id>` — pagination par curseur (id
+    décroissant), robuste aux nouveaux posts publiés entre deux pages.
+  - `GET /api/search?limit=&offset=` — pagination classique (l'extension C
+    trie par score, pas par id).
+  - Nouvelle commande terminal `more` pour continuer la pagination du
+    dernier `feed`/`search`.
+- **Tests automatisés** :
+  - `backend/tests/` (83 tests pytest) : auth, posts, likes, commentaires,
+    follow/unfollow, profils, messagerie, notifications, pagination.
+  - `c_ext/tests/` (16 tests pytest) : moteur de recherche C — indexation,
+    scoring, tri, pagination, suppression, isolation entre tests.
+  - `requirements-dev.txt` séparé des dépendances de production.
+- **Intégration continue** : `.github/workflows/tests.yml` — compile
+  l'extension C et lance toute la suite de tests à chaque push/pull request
+  sur `main`.
 
 ### Modifié
-- La suppression d'un post supprime aussi les notifications qui le
-  référencent, pour ne pas laisser de notification pointant dans le vide.
+- Réponses de `/api/feed` et `/api/search` : ne sont plus des tableaux
+  bruts mais des objets `{"posts"|"results": [...], "has_more": bool,
+  "next_cursor"|"next_offset": ...}`. Rupture de compatibilité pour tout
+  client externe consommant ces routes directement (le frontend fourni est
+  à jour).
 
-## [Non publié] — tests automatisés
-
-### Ajouté
-- `backend/tests/` : suite pytest (55 tests) couvrant auth, posts, likes,
-  commentaires, follow/unfollow, profils, messagerie privée, et la
-  pagination du fil et de la recherche introduite précédemment. Chaque test
-  s'exécute sur une base SQLite temporaire isolée (voir `conftest.py`).
-- `c_ext/tests/` : suite pytest (16 tests) pour le moteur de recherche C
-  (`searchengine`), indépendante du backend — indexation, scoring, tri,
-  pagination, suppression, remise à zéro, insensibilité à la casse.
-- `requirements-dev.txt` : dépendances de test (`pytest`, `httpx`), séparées
-  des dépendances de production.
-- Un test dédié (`test_search_isolation.py`) vérifie explicitement que
-  l'index de recherche C, qui vit dans une mémoire globale au process, est
-  bien réinitialisé entre deux tests — sans quoi des résultats d'un test
-  "fuiteraient" silencieusement vers le suivant.
-- `README.md` et `CONTRIBUTING.md` mis à jour avec les instructions pour
-  lancer les tests, et l'étape rendue explicite dans le workflow avant
-  toute pull request.
-
-## [Non publié] — pagination du fil et de la recherche
-
-### Ajouté
-- `GET /api/feed` accepte `before=<post_id>` : pagination par curseur (id
-  décroissant), robuste aux nouveaux posts publiés entre deux pages,
-  contrairement à un offset classique. Réponse désormais sous la forme
-  `{"posts": [...], "has_more": bool, "next_cursor": id|null}`.
-- `GET /api/search` accepte `limit` (≤ 50) et `offset` : pagination classique,
-  car l'extension C trie par score et non par id. Réponse sous la forme
-  `{"results": [...], "has_more": bool, "next_offset": int|null}`.
-- Nouvelle commande terminal `more` : continue la pagination du dernier
-  `feed` ou `search` lancé.
-
-### Modifié
-- Réponses de `/api/feed` et `/api/search` : ce ne sont plus des tableaux
-  bruts mais des objets enveloppant les résultats (voir ci-dessus). Rupture
-  de compatibilité pour tout client externe qui consommerait ces routes
-  directement (le frontend fourni est mis à jour en conséquence).
+### Vérifié
+- Suite complète (99 tests) exécutée avec succès avant publication de cette
+  version : `16 passed` (c_ext) + `83 passed` (backend).
 
 ## [v1.2] — upload d'images sur les posts
 
