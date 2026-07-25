@@ -5,7 +5,33 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
-## [Non publié] — hashtags et mentions
+## [Non publié] — reconnexion automatique du WebSocket
+
+### Ajouté
+- Reconnexion automatique après toute coupure non voulue (réseau, veille,
+  redémarrage du serveur), avec délai croissant (1s, 2s, 4s... plafonné à
+  30s), tant que l'utilisateur reste connecté.
+- Messages visibles dans le terminal : 🟡 à la perte de connexion, 🟢 à la
+  reconnexion réussie, 🔴 en cas de jeton expiré/invalide (pas de boucle
+  infinie dans ce cas : il faut retaper `login`).
+- Une déconnexion volontaire (`logout`) ne déclenche jamais de reconnexion.
+
+### Corrigé
+- Bug découvert par le test Playwright du scénario "jeton invalide" :
+  fermer l'ancienne connexion pour en ouvrir une nouvelle (dans
+  `connectRealtime()`) déclenchait à tort l'`onclose` de l'ancienne
+  connexion, qui programmait une reconnexion pour un socket déjà remplacé.
+  Corrigé en vérifiant, dans chaque `onclose`, que la variable globale
+  `socket` référence toujours CE socket précis avant d'agir.
+
+### Vérifié
+- Suite pytest inchangée (142/142, changement purement frontend).
+- 5 scénarios testés avec un vrai navigateur headless (Playwright) contre
+  un vrai serveur : connexion normale sans message parasite, coupure
+  serveur détectée, reconnexion automatique après redémarrage du serveur,
+  logout sans tentative de reconnexion, jeton invalide sans boucle infinie.
+
+## [v1.5] — hashtags et mentions
 
 ### Ajouté
 - `#hashtag` dans un post : indexé dans une nouvelle table `post_hashtags`,

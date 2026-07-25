@@ -108,15 +108,38 @@ fin du bloc `with`.
 6. La réponse JSON est renvoyée au frontend qui a fait la requête
 
 **Flux temps réel (WebSocket)** :
-1. Après login/register, le frontend ouvre `ws://.../ws?token=<jwt>`
-2. `app.py` vérifie le jeton (`auth.decode_token`) et enregistre la
-   connexion dans `realtime.manager`
-3. Quand quelqu'un publie un post ou envoie un message privé, la route HTTP
-   correspondante appelle `manager.send_to_user()` / `broadcast_to_users()`
+1. Après login/register, le frontend ouvre `ws://.../ws` (sans jeton dans
+   l'URL — voir l'encart sécurité ci-dessous), puis lui envoie
+   `{"token": "<jwt>"}` comme tout premier message une fois la connexion
+   acceptée.
+2. `app.py` (`websocket_endpoint`) attend ce premier message, vérifie le
+   jeton (`auth.decode_token`) et enregistre la connexion dans
+   `realtime.manager`. Ferme sinon la connexion avec le code `4401`.
+3. Quand quelqu'un publie un post, envoie un message privé, like, suit ou
+   mentionne quelqu'un, la route HTTP correspondante appelle
+   `manager.send_to_user()` / `broadcast_to_users()`.
 4. Si le destinataire a un onglet ouvert, il reçoit l'événement JSON
    instantanément ; sinon, rien ne se perd — il le verra en rafraîchissant
-   (`feed`, `conv <user>`) comme avant. Le WebSocket est un "plus", pas un
-   remplacement du fonctionnement classique par requêtes HTTP.
+   (`feed`, `conv <user>`, `notifications`) comme avant. Le WebSocket est un
+   "plus", pas un remplacement du fonctionnement classique par requêtes HTTP.
+5. **Reconnexion automatique** (`frontend/index.html`) : toute coupure non
+   voulue (réseau, redémarrage serveur) relance une tentative de connexion
+   avec un délai croissant (1s, 2s, 4s... plafonné à 30s), tant que
+   l'utilisateur reste connecté (jeton présent). Un échec d'authentification
+   (code `4401`, jeton expiré/invalide) n'est PAS retenté en boucle : le
+   message `🔴 Session temps réel expirée` invite à retaper `login`. Une
+   fermeture volontaire (`logout`) ne déclenche jamais de reconnexion (voir
+   `intentionalDisconnect`).
+
+**⚠️ Piège à connaître** : quand `connectRealtime()` remplace une connexion
+existante par une nouvelle (reconnexion, ou reconnexion manuelle après
+correction du jeton), l'ancienne connexion reçoit elle aussi un événement
+`onclose` en se fermant. Sans précaution, ce `onclose` obsolète déclenchait
+à tort une reconnexion pour une connexion déjà remplacée par une plus
+récente (bug réel rencontré pendant le développement, révélé par le test
+Playwright du scénario "jeton invalide"). Chaque `onclose` vérifie donc
+d'abord que la variable globale `socket` pointe toujours vers CE socket
+précis avant d'agir — sinon l'événement est ignoré car obsolète.
 
 ### `frontend/` — interface terminal
 
