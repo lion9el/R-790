@@ -58,6 +58,27 @@ CREATE TABLE IF NOT EXISTS messages (
     FOREIGN KEY (receiver_id) REFERENCES users(id)
 );
 
+CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- Destinataire de la notification (celui qui la voit).
+    user_id INTEGER NOT NULL,
+    -- 'like' | 'follow' | 'message'
+    type TEXT NOT NULL,
+    -- Auteur de l'action qui a déclenché la notification (celui qui like,
+    -- suit, ou envoie le message). Stocké par nom d'utilisateur plutôt que
+    -- par id pour rester lisible même si on veut inspecter la table à la main.
+    from_username TEXT NOT NULL,
+    -- Post concerné, uniquement pour les notifications de type 'like'.
+    post_id INTEGER,
+    -- Court extrait du contenu, utilisé pour les notifications de type
+    -- 'message' (aperçu du message reçu).
+    content TEXT,
+    created_at TEXT NOT NULL,
+    is_read INTEGER DEFAULT 0,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_posts_user ON posts(user_id);
 CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id);
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(sender_id, receiver_id);

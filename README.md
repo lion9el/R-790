@@ -69,6 +69,7 @@ Une fois la page ouverte, tape `help` pour voir la liste. Résumé :
 | `msg <user> <texte>` | message privé |
 | `conv <user>` | lire une conversation |
 | `inbox` | liste des conversations |
+| `notifications` | voir les notifications (likes, follows, messages) |
 | `search <mots>` | recherche full-text (moteur C) |
 
 ## Travailler à plusieurs sur ce projet
@@ -87,7 +88,7 @@ fonctionnelle (chaque état stable est aussi marqué par un tag Git, ex: `v1.0`)
 ## Pistes d'évolution
 
 - Pagination du fil et de la recherche
-- Notifications (nouveaux followers, likes, messages)
+- Notification sur les commentaires (actuellement uniquement likes/follows/messages)
 - Déploiement : Postgres au lieu de SQLite pour la production,
   reverse-proxy (nginx) devant uvicorn, HTTPS
 - Tests automatisés (pytest pour l'API, tests unitaires pour l'extension C)

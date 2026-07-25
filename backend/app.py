@@ -225,6 +225,67 @@ def login(body: LoginIn):
     return {"token": token, "username": row["username"]}
 
 
+# ---------- Notifications ----------
+# Une notification est créée en base à chaque "événement social" concernant
+# un utilisateur (quelqu'un like son post, le suit, ou lui envoie un
+# message). Contrairement aux WebSocket seuls, elle est persistée : même
+# hors ligne au moment de l'événement, l'utilisateur la retrouve plus tard
+# via GET /api/notifications.
+
+def _create_notification(conn, user_id, ntype, from_username, post_id=None, content=None):
+    """Insère une notification en base et la renvoie sérialisée (dict JSON).
+
+    N'envoie rien par WebSocket elle-même : c'est à l'appelant de décider si
+    un push temps réel est nécessaire (voir like_post, follow_user — pour
+    les messages, l'événement WebSocket "message" existant suffit déjà,
+    donc aucun push supplémentaire n'est fait pour ce type).
+    """
+    created_at = now()
+    cur = conn.execute(
+        "INSERT INTO notifications (user_id, type, from_username, post_id, content, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, ntype, from_username, post_id, content, created_at),
+    )
+    conn.commit()
+    return {
+        "id": cur.lastrowid,
+        "type": ntype,
+        "from": from_username,
+        "post_id": post_id,
+        "content": content,
+        "created_at": created_at,
+        "is_read": False,
+    }
+
+
+@app.get("/api/notifications")
+def list_notifications(limit: int = 30, user=Depends(get_current_user)):
+    """Liste les notifications de l'utilisateur courant, les plus récentes
+    d'abord. Marque comme lues toutes celles renvoyées par cet appel — comme
+    ouvrir sa boîte de notifications dans une vraie appli (voir aussi
+    get_conversation, qui suit le même principe pour les messages)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+            (user["id"], limit),
+        ).fetchall()
+        result = [
+            {
+                "id": r["id"],
+                "type": r["type"],
+                "from": r["from_username"],
+                "post_id": r["post_id"],
+                "content": r["content"],
+                "created_at": r["created_at"],
+                "is_read": bool(r["is_read"]),
+            }
+            for r in rows
+        ]
+        conn.execute("UPDATE notifications SET is_read = 1 WHERE user_id = ?", (user["id"],))
+        conn.commit()
+        return result
+
+
 # ---------- Posts / fil d'actualité ----------
 
 def _serialize_post(conn, row, current_user_id):
@@ -320,27 +381,46 @@ def feed(limit: int = 30, user=Depends(get_current_user)):
 
 
 @app.post("/api/posts/{post_id}/like")
-def like_post(post_id: int, user=Depends(get_current_user)):
+async def like_post(post_id: int, user=Depends(get_current_user)):
     """Ajoute un like de l'utilisateur courant sur un post.
 
     Idempotent : si le post est déjà liké par cet utilisateur, l'insertion
     échoue silencieusement (contrainte PRIMARY KEY (post_id, user_id) dans
     schema.sql) et on répond quand même 200 — reliker n'est pas une erreur
-    du point de vue de l'utilisateur.
+    du point de vue de l'utilisateur. Dans ce cas, aucune notification n'est
+    recréée (on ne notifie qu'au premier like).
+
+    Notifie l'auteur du post (sauf s'il like son propre post) : la
+    notification est toujours enregistrée en base, et poussée en temps réel
+    en plus s'il est connecté.
     """
     with get_conn() as conn:
-        post = conn.execute("SELECT id FROM posts WHERE id = ?", (post_id,)).fetchone()
+        post = conn.execute("SELECT id, user_id FROM posts WHERE id = ?", (post_id,)).fetchone()
         if not post:
             raise HTTPException(status_code=404, detail="Post introuvable.")
-        try:
-            conn.execute(
-                "INSERT INTO likes (post_id, user_id, created_at) VALUES (?, ?, ?)",
-                (post_id, user["id"], now()),
+        already_liked = conn.execute(
+            "SELECT 1 FROM likes WHERE post_id = ? AND user_id = ?", (post_id, user["id"])
+        ).fetchone() is not None
+
+        if already_liked:
+            # Déjà liké : rien à faire, pas de nouvelle notification.
+            return {"ok": True}
+
+        conn.execute(
+            "INSERT INTO likes (post_id, user_id, created_at) VALUES (?, ?, ?)",
+            (post_id, user["id"], now()),
+        )
+        conn.commit()
+
+        notification = None
+        if post["user_id"] != user["id"]:
+            notification = _create_notification(
+                conn, post["user_id"], "like", user["username"], post_id=post_id
             )
-            conn.commit()
-        except Exception:
-            pass  # déjà liké, on ignore
-        return {"ok": True}
+
+    if notification:
+        await manager.send_to_user(post["user_id"], {"type": "notification", "notification": notification})
+    return {"ok": True}
 
 
 @app.delete("/api/posts/{post_id}/like")
@@ -390,11 +470,11 @@ def list_comments(post_id: int, user=Depends(get_current_user)):
 # ---------- Follow ----------
 
 @app.post("/api/follow/{username}")
-def follow_user(username: str, user=Depends(get_current_user)):
+async def follow_user(username: str, user=Depends(get_current_user)):
     """Fait suivre `username` par l'utilisateur courant.
 
     Refuse de se suivre soi-même (400). Idempotent comme les likes : suivre
-    deux fois quelqu'un ne provoque pas d'erreur.
+    deux fois quelqu'un ne provoque pas d'erreur ni de notification en double.
     """
     with get_conn() as conn:
         target = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
@@ -402,15 +482,23 @@ def follow_user(username: str, user=Depends(get_current_user)):
             raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
         if target["id"] == user["id"]:
             raise HTTPException(status_code=400, detail="Tu ne peux pas te suivre toi-même.")
-        try:
-            conn.execute(
-                "INSERT INTO follows (follower_id, followed_id, created_at) VALUES (?, ?, ?)",
-                (user["id"], target["id"], now()),
-            )
-            conn.commit()
-        except Exception:
-            pass
-        return {"ok": True}
+
+        already_following = conn.execute(
+            "SELECT 1 FROM follows WHERE follower_id = ? AND followed_id = ?", (user["id"], target["id"])
+        ).fetchone() is not None
+        if already_following:
+            return {"ok": True}
+
+        conn.execute(
+            "INSERT INTO follows (follower_id, followed_id, created_at) VALUES (?, ?, ?)",
+            (user["id"], target["id"], now()),
+        )
+        conn.commit()
+        notification = _create_notification(conn, target["id"], "follow", user["username"])
+        target_id = target["id"]
+
+    await manager.send_to_user(target_id, {"type": "notification", "notification": notification})
+    return {"ok": True}
 
 
 @app.delete("/api/follow/{username}")
@@ -455,7 +543,12 @@ async def send_message(body: MessageIn, user=Depends(get_current_user)):
 
     Pousse aussi le message en temps réel (WebSocket) si le destinataire est
     connecté ; sinon il le verra en rouvrant la conversation plus tard via
-    GET /api/messages/{username}, comme d'habitude.
+    GET /api/messages/{username}, comme d'habitude. Une notification de type
+    'message' est en plus enregistrée en base (voir _create_notification) —
+    utile si le destinataire consulte GET /api/notifications après avoir été
+    hors ligne. On ne pousse volontairement pas de second événement
+    WebSocket pour cette notification : l'événement "message" ci-dessous
+    sert déjà de signal temps réel, un second ping serait redondant.
     """
     sent_at = now()
     with get_conn() as conn:
@@ -468,6 +561,8 @@ async def send_message(body: MessageIn, user=Depends(get_current_user)):
         )
         conn.commit()
         target_id = target["id"]
+        snippet = body.content[:80] + ("…" if len(body.content) > 80 else "")
+        _create_notification(conn, target_id, "message", user["username"], content=snippet)
 
     await manager.send_to_user(
         target_id,
