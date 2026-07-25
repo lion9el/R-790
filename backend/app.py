@@ -170,6 +170,11 @@ class PostIn(BaseModel):
     content: str = Field(min_length=1, max_length=1000)
 
 
+class PostEditIn(BaseModel):
+    """Corps attendu pour PATCH /api/posts/{post_id}."""
+    content: str = Field(min_length=1, max_length=1000)
+
+
 class CommentIn(BaseModel):
     """Corps attendu pour POST /api/posts/{post_id}/comments."""
     content: str = Field(min_length=1, max_length=500)
@@ -374,6 +379,66 @@ def unlike_post(post_id: int, user=Depends(get_current_user)):
         return {"ok": True}
 
 
+@app.patch("/api/posts/{post_id}")
+def edit_post(post_id: int, body: PostEditIn, user=Depends(get_current_user)):
+    """Modifie le texte d'un post dont l'utilisateur courant est l'auteur.
+
+    L'index de recherche est mis à jour dans la même opération : on retire
+    l'ancien texte (`index_remove` a besoin du texte d'origine pour savoir
+    quels mots désindexer) avant d'indexer le nouveau, sinon une recherche
+    sur un mot supprimé continuerait de remonter le post.
+
+    L'image jointe n'est pas modifiable : seul le texte l'est.
+    """
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Post introuvable.")
+        if row["user_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="Tu ne peux modifier que tes propres posts.")
+
+        conn.execute("UPDATE posts SET content = ? WHERE id = ?", (body.content, post_id))
+        conn.commit()
+        searchengine.index_remove(post_id, row["content"])
+        searchengine.index_add(post_id, body.content)
+        updated = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
+        return _serialize_post(conn, updated, user["id"])
+
+
+@app.delete("/api/posts/{post_id}")
+def delete_post(post_id: int, user=Depends(get_current_user)):
+    """Supprime un post dont l'utilisateur courant est l'auteur, ainsi que
+    tout ce qui en dépend : likes, commentaires, image jointe et entrées
+    dans l'index de recherche.
+
+    Les likes et commentaires doivent partir en premier : ils référencent
+    `posts(id)` par clé étrangère (activée dans database.py) et la
+    suppression du post échouerait sinon. Le fichier image est effacé du
+    disque pour ne pas laisser d'orphelins dans backend/uploads/.
+    """
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Post introuvable.")
+        if row["user_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="Tu ne peux supprimer que tes propres posts.")
+
+        conn.execute("DELETE FROM likes WHERE post_id = ?", (post_id,))
+        conn.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
+        conn.execute("DELETE FROM posts WHERE id = ?", (post_id,))
+        conn.commit()
+
+    searchengine.index_remove(post_id, row["content"])
+
+    image_path = row["image_path"] if "image_path" in row.keys() else None
+    if image_path:
+        try:
+            os.remove(os.path.join(UPLOAD_DIR, image_path))
+        except FileNotFoundError:
+            pass
+    return {"ok": True}
+
+
 @app.post("/api/posts/{post_id}/comments")
 def add_comment(post_id: int, body: CommentIn, user=Depends(get_current_user)):
     """Ajoute un commentaire de l'utilisateur courant sur un post existant."""
@@ -403,9 +468,39 @@ def list_comments(post_id: int, user=Depends(get_current_user)):
             (post_id,),
         ).fetchall()
         return [
-            {"author": r["username"], "content": r["content"], "created_at": r["created_at"]}
+            {
+                "id": r["id"],
+                "author": r["username"],
+                "content": r["content"],
+                "created_at": r["created_at"],
+            }
             for r in rows
         ]
+
+
+@app.delete("/api/comments/{comment_id}")
+def delete_comment(comment_id: int, user=Depends(get_current_user)):
+    """Supprime un commentaire. Autorisé à son auteur, mais aussi à l'auteur
+    du post commenté (modération de sa propre publication)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT c.id, c.user_id, p.user_id AS post_author_id
+            FROM comments c JOIN posts p ON p.id = c.post_id
+            WHERE c.id = ?
+            """,
+            (comment_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Commentaire introuvable.")
+        if user["id"] not in (row["user_id"], row["post_author_id"]):
+            raise HTTPException(
+                status_code=403,
+                detail="Seul l'auteur du commentaire ou celui du post peut le supprimer.",
+            )
+        conn.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
+        conn.commit()
+        return {"ok": True}
 
 
 # ---------- Follow ----------

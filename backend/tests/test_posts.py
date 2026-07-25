@@ -199,3 +199,97 @@ def test_comment_empty_content_rejected(client, register):
     post = create_post(client, headers, "post normal")
     resp = client.post(f"/api/posts/{post['id']}/comments", headers=headers, json={"content": ""})
     assert resp.status_code == 422
+
+
+# ---------- Édition / suppression ----------
+
+def _create_post(client, headers, content="mon post"):
+    return client.post("/api/posts", data={"content": content}, headers=headers).json()["id"]
+
+
+def test_edit_own_post(client, register):
+    headers, _ = register("alice")
+    post_id = _create_post(client, headers, "version initiale")
+    resp = client.patch(f"/api/posts/{post_id}", json={"content": "version corrigée"}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["content"] == "version corrigée"
+
+
+def test_edit_reindexes_search(client, register):
+    headers, _ = register("alice")
+    post_id = _create_post(client, headers, "banane")
+    client.patch(f"/api/posts/{post_id}", json={"content": "cerise"}, headers=headers)
+    assert client.get("/api/search?q=banane", headers=headers).json()["results"] == []
+    assert len(client.get("/api/search?q=cerise", headers=headers).json()["results"]) == 1
+
+
+def test_edit_someone_elses_post_rejected(client, register):
+    alice_headers, _ = register("alice")
+    bob_headers, _ = register("bob")
+    post_id = _create_post(client, alice_headers)
+    resp = client.patch(f"/api/posts/{post_id}", json={"content": "piraté"}, headers=bob_headers)
+    assert resp.status_code == 403
+
+
+def test_delete_own_post(client, register):
+    headers, _ = register("alice")
+    post_id = _create_post(client, headers)
+    assert client.delete(f"/api/posts/{post_id}", headers=headers).status_code == 200
+    assert client.get("/api/feed", headers=headers).json()["posts"] == []
+
+
+def test_delete_removes_post_from_search(client, register):
+    headers, _ = register("alice")
+    post_id = _create_post(client, headers, "abricot")
+    client.delete(f"/api/posts/{post_id}", headers=headers)
+    assert client.get("/api/search?q=abricot", headers=headers).json()["results"] == []
+
+
+def test_delete_post_with_likes_and_comments(client, register):
+    alice_headers, _ = register("alice")
+    bob_headers, _ = register("bob")
+    post_id = _create_post(client, alice_headers)
+    client.post(f"/api/posts/{post_id}/like", headers=bob_headers)
+    client.post(f"/api/posts/{post_id}/comments", json={"content": "sympa"}, headers=bob_headers)
+    assert client.delete(f"/api/posts/{post_id}", headers=alice_headers).status_code == 200
+
+
+def test_delete_someone_elses_post_rejected(client, register):
+    alice_headers, _ = register("alice")
+    bob_headers, _ = register("bob")
+    post_id = _create_post(client, alice_headers)
+    assert client.delete(f"/api/posts/{post_id}", headers=bob_headers).status_code == 403
+
+
+def test_delete_unknown_post_returns_404(client, register):
+    headers, _ = register("alice")
+    assert client.delete("/api/posts/9999", headers=headers).status_code == 404
+
+
+def test_delete_own_comment(client, register):
+    alice_headers, _ = register("alice")
+    bob_headers, _ = register("bob")
+    post_id = _create_post(client, alice_headers)
+    client.post(f"/api/posts/{post_id}/comments", json={"content": "oups"}, headers=bob_headers)
+    comment_id = client.get(f"/api/posts/{post_id}/comments", headers=bob_headers).json()[0]["id"]
+    assert client.delete(f"/api/comments/{comment_id}", headers=bob_headers).status_code == 200
+    assert client.get(f"/api/posts/{post_id}/comments", headers=bob_headers).json() == []
+
+
+def test_post_author_can_delete_any_comment_on_their_post(client, register):
+    alice_headers, _ = register("alice")
+    bob_headers, _ = register("bob")
+    post_id = _create_post(client, alice_headers)
+    client.post(f"/api/posts/{post_id}/comments", json={"content": "spam"}, headers=bob_headers)
+    comment_id = client.get(f"/api/posts/{post_id}/comments", headers=alice_headers).json()[0]["id"]
+    assert client.delete(f"/api/comments/{comment_id}", headers=alice_headers).status_code == 200
+
+
+def test_delete_comment_by_unrelated_user_rejected(client, register):
+    alice_headers, _ = register("alice")
+    bob_headers, _ = register("bob")
+    carol_headers, _ = register("carol")
+    post_id = _create_post(client, alice_headers)
+    client.post(f"/api/posts/{post_id}/comments", json={"content": "coucou"}, headers=bob_headers)
+    comment_id = client.get(f"/api/posts/{post_id}/comments", headers=bob_headers).json()[0]["id"]
+    assert client.delete(f"/api/comments/{comment_id}", headers=carol_headers).status_code == 403
