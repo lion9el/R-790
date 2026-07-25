@@ -50,6 +50,20 @@ pip install -r requirements.txt
 cd backend && python3 -m uvicorn app:app --reload
 ```
 
+## Lancer les tests
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+cd c_ext && python3 setup.py build_ext --inplace && cd ..
+
+cd backend && python3 -m pytest    # tests de l'API (pytest + FastAPI TestClient)
+cd ../c_ext && python3 -m pytest   # tests unitaires du moteur de recherche C
+```
+
+Chaque test de `backend/tests/` tourne sur une base SQLite temporaire propre
+(voir `backend/tests/conftest.py`) : aucun risque de polluer ta vraie base
+locale (`backend/socialnet.db`) ni celle d'un autre développeur.
+
 ## Commandes du terminal
 
 Une fois la page ouverte, tape `help` pour voir la liste. Résumé :
@@ -70,6 +84,7 @@ Une fois la page ouverte, tape `help` pour voir la liste. Résumé :
 | `conv <user>` | lire une conversation |
 | `inbox` | liste des conversations |
 | `search <mots>` | recherche full-text (moteur C) |
+| `more` | voir la suite du dernier `feed` ou `search` (pagination) |
 
 ## Travailler à plusieurs sur ce projet
 
@@ -86,8 +101,6 @@ fonctionnelle (chaque état stable est aussi marqué par un tag Git, ex: `v1.0`)
 
 ## Pistes d'évolution
 
-- Pagination du fil et de la recherche
 - Notifications (nouveaux followers, likes, messages)
 - Déploiement : Postgres au lieu de SQLite pour la production,
   reverse-proxy (nginx) devant uvicorn, HTTPS
-- Tests automatisés (pytest pour l'API, tests unitaires pour l'extension C)

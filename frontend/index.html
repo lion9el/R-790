@@ -106,6 +106,12 @@ const whoami = document.getElementById("whoami");
 const fileInput = document.getElementById("fileInput");
 let pendingPostText = null; // texte en attente pendant que l'utilisateur choisit une image (commande postimg)
 
+// État de la pagination en cours (fil OU recherche, un seul à la fois : le
+// second écrase le premier). `more` regarde ce champ pour savoir quoi
+// continuer. `null` quand il n'y a rien à paginer (pas encore de feed/search
+// lancé, ou dernière page déjà atteinte).
+let pagination = null; // { type: "feed", limit, cursor } | { type: "search", limit, query, offset }
+
 function print(text, cls) {
   const div = document.createElement("div");
   div.className = "line" + (cls ? " " + cls : "");
@@ -242,7 +248,8 @@ const COMMANDS = {
     print("  whoami                       afficher l'utilisateur courant");
     print("  post <texte>                 publier un post");
     print("  postimg <texte>              publier un post avec une image jointe");
-    print("  feed [n]                     afficher le fil d'actualité");
+    print("  feed [n]                     afficher le fil d'actualité (n = taille de page, 30 par défaut)");
+    print("  more                         voir la suite du dernier 'feed' ou 'search'");
     print("  like <id>                    liker un post");
     print("  unlike <id>                  retirer son like");
     print("  comment <id> <texte>         commenter un post");
@@ -313,9 +320,14 @@ const COMMANDS = {
   async feed(args) {
     if (!requireAuth()) return;
     const limit = parseInt(args[0]) || 30;
-    const posts = await api("GET", `/api/feed?limit=${limit}`);
-    if (posts.length === 0) return print("Fil vide. Suis des gens ou publie un post !", "dim");
-    posts.forEach(p => printHTML(fmtPost(p)));
+    const data = await api("GET", `/api/feed?limit=${limit}`);
+    if (data.posts.length === 0) {
+      pagination = null;
+      return print("Fil vide. Suis des gens ou publie un post !", "dim");
+    }
+    data.posts.forEach(p => printHTML(fmtPost(p)));
+    pagination = data.has_more ? { type: "feed", limit, cursor: data.next_cursor } : null;
+    if (data.has_more) print("— tape 'more' pour voir la suite du fil —", "dim");
   },
 
   async like(args) {
@@ -407,9 +419,42 @@ const COMMANDS = {
     if (!requireAuth()) return;
     const q = args.join(" ");
     if (!q) return print("usage: search <mots>", "err");
-    const results = await api("GET", `/api/search?q=${encodeURIComponent(q)}`);
-    if (results.length === 0) return print("Aucun résultat.", "dim");
-    results.forEach(p => printHTML(fmtPost(p)));
+    const limit = 20;
+    const data = await api("GET", `/api/search?q=${encodeURIComponent(q)}&limit=${limit}`);
+    if (data.results.length === 0) {
+      pagination = null;
+      return print("Aucun résultat.", "dim");
+    }
+    data.results.forEach(p => printHTML(fmtPost(p)));
+    pagination = data.has_more ? { type: "search", limit, query: q, offset: data.next_offset } : null;
+    if (data.has_more) print("— tape 'more' pour voir la suite des résultats —", "dim");
+  },
+
+  async more() {
+    if (!requireAuth()) return;
+    if (!pagination) return print("Rien à continuer : lance d'abord 'feed' ou 'search'.", "dim");
+
+    if (pagination.type === "feed") {
+      const { limit, cursor } = pagination;
+      const data = await api("GET", `/api/feed?limit=${limit}&before=${cursor}`);
+      if (data.posts.length === 0) {
+        pagination = null;
+        return print("Plus rien à afficher dans le fil.", "dim");
+      }
+      data.posts.forEach(p => printHTML(fmtPost(p)));
+      pagination = data.has_more ? { type: "feed", limit, cursor: data.next_cursor } : null;
+      if (data.has_more) print("— tape 'more' pour voir la suite du fil —", "dim");
+    } else if (pagination.type === "search") {
+      const { limit, query, offset } = pagination;
+      const data = await api("GET", `/api/search?q=${encodeURIComponent(query)}&limit=${limit}&offset=${offset}`);
+      if (data.results.length === 0) {
+        pagination = null;
+        return print("Plus aucun résultat.", "dim");
+      }
+      data.results.forEach(p => printHTML(fmtPost(p)));
+      pagination = data.has_more ? { type: "search", limit, query, offset: data.next_offset } : null;
+      if (data.has_more) print("— tape 'more' pour voir la suite des résultats —", "dim");
+    }
   },
 
   clear() {

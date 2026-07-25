@@ -79,9 +79,17 @@ cd c_ext && python3 setup.py build_ext --inplace && cd ..
 
 # Relancer le serveur et tester manuellement les commandes touchées
 ./run.sh
+
+# Lancer les tests automatisés (voir README.md > Lancer les tests)
+cd backend && python3 -m pytest
+cd ../c_ext && python3 -m pytest
 ```
 
-Ne jamais proposer une modification qu'on n'a pas testée soi-même.
+Ne jamais proposer une modification qu'on n'a pas testée soi-même. Si ta
+modification touche une route API ou le moteur de recherche C, ajoute ou
+mets à jour les tests correspondants dans `backend/tests/` ou
+`c_ext/tests/` — ne compte pas uniquement sur les tests existants pour
+couvrir du nouveau comportement.
 
 ### 5. Pousser la branche et ouvrir une pull request
 

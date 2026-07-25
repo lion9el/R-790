@@ -5,6 +5,45 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
+## [Non publié] — tests automatisés
+
+### Ajouté
+- `backend/tests/` : suite pytest (55 tests) couvrant auth, posts, likes,
+  commentaires, follow/unfollow, profils, messagerie privée, et la
+  pagination du fil et de la recherche introduite précédemment. Chaque test
+  s'exécute sur une base SQLite temporaire isolée (voir `conftest.py`).
+- `c_ext/tests/` : suite pytest (16 tests) pour le moteur de recherche C
+  (`searchengine`), indépendante du backend — indexation, scoring, tri,
+  pagination, suppression, remise à zéro, insensibilité à la casse.
+- `requirements-dev.txt` : dépendances de test (`pytest`, `httpx`), séparées
+  des dépendances de production.
+- Un test dédié (`test_search_isolation.py`) vérifie explicitement que
+  l'index de recherche C, qui vit dans une mémoire globale au process, est
+  bien réinitialisé entre deux tests — sans quoi des résultats d'un test
+  "fuiteraient" silencieusement vers le suivant.
+- `README.md` et `CONTRIBUTING.md` mis à jour avec les instructions pour
+  lancer les tests, et l'étape rendue explicite dans le workflow avant
+  toute pull request.
+
+## [Non publié] — pagination du fil et de la recherche
+
+### Ajouté
+- `GET /api/feed` accepte `before=<post_id>` : pagination par curseur (id
+  décroissant), robuste aux nouveaux posts publiés entre deux pages,
+  contrairement à un offset classique. Réponse désormais sous la forme
+  `{"posts": [...], "has_more": bool, "next_cursor": id|null}`.
+- `GET /api/search` accepte `limit` (≤ 50) et `offset` : pagination classique,
+  car l'extension C trie par score et non par id. Réponse sous la forme
+  `{"results": [...], "has_more": bool, "next_offset": int|null}`.
+- Nouvelle commande terminal `more` : continue la pagination du dernier
+  `feed` ou `search` lancé.
+
+### Modifié
+- Réponses de `/api/feed` et `/api/search` : ce ne sont plus des tableaux
+  bruts mais des objets enveloppant les résultats (voir ci-dessus). Rupture
+  de compatibilité pour tout client externe qui consommerait ces routes
+  directement (le frontend fourni est mis à jour en conséquence).
+
 ## [Non publié] — upload d'images sur les posts
 
 ### Ajouté
