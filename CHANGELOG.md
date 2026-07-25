@@ -5,7 +5,26 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
-## [Non publié] — messagerie et fil en temps réel
+## [Non publié] — upload d'images sur les posts
+
+### Ajouté
+- `POST /api/posts` accepte maintenant une image optionnelle (`multipart/form-data`
+  au lieu de JSON) : formats acceptés PNG/JPEG/GIF/WEBP, 5 Mo maximum.
+- Les images sont stockées dans `backend/uploads/` (hors Git) et servies via
+  `/uploads/<fichier>`.
+- Nouvelle commande terminal `postimg <texte>` : ouvre un sélecteur de
+  fichier puis publie le post avec l'image choisie.
+- Migration automatique de la base existante (ajout de la colonne
+  `posts.image_path`) au démarrage du serveur — aucune perte de données pour
+  les bases déjà créées avec une version antérieure.
+
+### Sécurité
+- Le type de fichier est vérifié par Content-Type (liste blanche), pas par
+  l'extension fournie par le client.
+- Le nom de fichier stocké est généré aléatoirement (UUID), jamais dérivé du
+  nom envoyé par le client — élimine tout risque de traversée de chemin.
+
+## [v1.1] — messagerie et fil en temps réel
 
 ### Ajouté
 - Connexion WebSocket (`GET /ws?token=...`) authentifiée par jeton JWT.

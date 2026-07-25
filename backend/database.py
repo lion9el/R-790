@@ -13,10 +13,30 @@ SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.sql")
 
 
 def init_db():
-    """Crée les tables si elles n'existent pas encore."""
+    """Crée les tables si elles n'existent pas encore, puis applique les
+    migrations légères (colonnes ajoutées depuis la v1.0, voir
+    _apply_migrations). Appelé une fois au démarrage du serveur.
+    """
     with get_conn() as conn:
         with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
             conn.executescript(f.read())
+        conn.commit()
+        _apply_migrations(conn)
+
+
+def _apply_migrations(conn):
+    """Ajoute les colonnes introduites après la création initiale des tables.
+
+    `CREATE TABLE IF NOT EXISTS` (dans schema.sql) ne modifie jamais une
+    table déjà existante : si quelqu'un a déjà une base créée avec une
+    ancienne version du schéma, il faut ajouter les nouvelles colonnes à la
+    main pour ne pas perdre ses données existantes. Chaque migration vérifie
+    d'abord si la colonne existe déjà avant de l'ajouter, pour rester
+    exécutable sans risque à chaque démarrage.
+    """
+    existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(posts)")}
+    if "image_path" not in existing_columns:
+        conn.execute("ALTER TABLE posts ADD COLUMN image_path TEXT")
         conn.commit()
 
 

@@ -63,6 +63,7 @@ binaire dépend de l'OS et de la version de Python.
 | `database.py` | Ouverture de connexion SQLite, création des tables. |
 | `schema.sql` | Définition des tables (users, posts, likes, comments, follows, messages). |
 | `realtime.py` | Registre des connexions WebSocket actives (`ConnectionManager`) ; pousse les événements "nouveau message" et "nouveau post" aux utilisateurs connectés. |
+| `uploads/` | Images jointes aux posts, stockées telles quelles sur disque (nom généré aléatoirement). Hors Git — voir `.gitignore`. |
 
 **Flux d'une requête type** (ex: publier un post) :
 1. Le frontend envoie `POST /api/posts` avec le texte et le jeton JWT

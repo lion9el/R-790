@@ -58,6 +58,11 @@
   }
   .post .meta { color: var(--amber-dim); font-size: 12px; }
   .post .content { color: var(--amber); }
+  .post .post-image {
+    max-width: 320px; max-height: 320px; margin-top: 6px;
+    border: 1px solid var(--amber-faint); display: block;
+    filter: sepia(30%) saturate(150%) hue-rotate(-10deg);
+  }
   #inputRow {
     display: flex; align-items: center; padding: 10px 18px;
     border-top: 1px solid var(--amber-faint); background: var(--bg-panel);
@@ -84,6 +89,7 @@
     <span id="prompt">guest&gt;</span>
     <input id="cmdInput" autocomplete="off" spellcheck="false" placeholder="tape une commande… (help pour la liste)" autofocus>
   </div>
+  <input type="file" id="fileInput" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none">
 </div>
 
 <script>
@@ -97,6 +103,8 @@ const screen = document.getElementById("screen");
 const input = document.getElementById("cmdInput");
 const prompt = document.getElementById("prompt");
 const whoami = document.getElementById("whoami");
+const fileInput = document.getElementById("fileInput");
+let pendingPostText = null; // texte en attente pendant que l'utilisateur choisit une image (commande postimg)
 
 function print(text, cls) {
   const div = document.createElement("div");
@@ -179,11 +187,32 @@ async function api(method, path, body, auth = true) {
   return data;
 }
 
+// Comme api(), mais pour envoyer un FormData (texte + fichier) au lieu de
+// JSON — nécessaire pour l'upload d'image. Pas de Content-Type manuel ici :
+// le navigateur le calcule lui-même avec la "boundary" correcte pour le
+// multipart, ce qui casserait si on le fixait à la main.
+async function apiForm(method, path, formData) {
+  const headers = {};
+  if (token) headers["Authorization"] = "Bearer " + token;
+  const res = await fetch(API + path, { method, headers, body: formData });
+  let data = null;
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok) {
+    const msg = (data && data.detail) ? data.detail : ("erreur HTTP " + res.status);
+    throw new Error(msg);
+  }
+  return data;
+}
+
 function fmtPost(p) {
   const liked = p.liked_by_me ? "♥" : "♡";
+  const imageHtml = p.image_url
+    ? `<img class="post-image" src="${escapeHtml(p.image_url)}" alt="image jointe">`
+    : "";
   return `<div class="post">` +
     `<div class="meta">#${p.id} @${escapeHtml(p.author)} — ${fmtDate(p.created_at)}${p.score !== undefined ? " (score " + p.score + ")" : ""}</div>` +
     `<div class="content">${escapeHtml(p.content)}</div>` +
+    imageHtml +
     `<div class="meta">${liked} ${p.likes} likes · 💬 ${p.comments} commentaires</div>` +
     `</div>`;
 }
@@ -212,6 +241,7 @@ const COMMANDS = {
     print("  logout                       se déconnecter");
     print("  whoami                       afficher l'utilisateur courant");
     print("  post <texte>                 publier un post");
+    print("  postimg <texte>              publier un post avec une image jointe");
     print("  feed [n]                     afficher le fil d'actualité");
     print("  like <id>                    liker un post");
     print("  unlike <id>                  retirer son like");
@@ -265,9 +295,19 @@ const COMMANDS = {
     if (!requireAuth()) return;
     const text = args.join(" ");
     if (!text) return print("usage: post <texte>", "err");
-    const p = await api("POST", "/api/posts", { content: text });
+    const formData = new FormData();
+    formData.append("content", text);
+    const p = await apiForm("POST", "/api/posts", formData);
     print("Publié :");
     printHTML(fmtPost(p));
+  },
+
+  postimg(args) {
+    if (!requireAuth()) return;
+    const text = args.join(" ");
+    if (!text) return print("usage: postimg <texte> (une fenêtre va s'ouvrir pour choisir l'image)", "err");
+    pendingPostText = text;
+    fileInput.click();
   },
 
   async feed(args) {
@@ -416,6 +456,27 @@ input.addEventListener("keydown", (e) => {
 });
 
 document.addEventListener("click", () => input.focus());
+
+fileInput.addEventListener("change", async () => {
+  const file = fileInput.files[0];
+  fileInput.value = ""; // permet de resélectionner le même fichier plus tard
+  if (!file || pendingPostText === null) return;
+  const text = pendingPostText;
+  pendingPostText = null;
+  try {
+    const formData = new FormData();
+    formData.append("content", text);
+    formData.append("image", file);
+    print(`postimg ${text}`, "cmd");
+    const p = await apiForm("POST", "/api/posts", formData);
+    print("Publié avec image :");
+    printHTML(fmtPost(p));
+  } catch (e) {
+    print("Erreur: " + e.message, "err");
+  }
+  print("");
+  input.focus();
+});
 </script>
 </body>
 </html>

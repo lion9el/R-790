@@ -12,6 +12,10 @@ CREATE TABLE IF NOT EXISTS posts (
     user_id INTEGER NOT NULL,
     content TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    -- Nom de fichier de l'image jointe (ex: "a1b2c3.jpg"), NULL si aucune.
+    -- Ajoutée après la v1.0 ; voir database.py::_apply_migrations pour les
+    -- bases déjà créées avant cet ajout.
+    image_path TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 

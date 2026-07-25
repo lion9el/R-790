@@ -59,6 +59,7 @@ Une fois la page ouverte, tape `help` pour voir la liste. Résumé :
 | `register <user> <mdp>` | créer un compte |
 | `login <user> <mdp>` | se connecter |
 | `post <texte>` | publier |
+| `postimg <texte>` | publier avec une image jointe (choix du fichier via une fenêtre) |
 | `feed [n]` | afficher le fil |
 | `like` / `unlike <id>` | liker / retirer un like |
 | `comment <id> <texte>` | commenter |
@@ -85,9 +86,7 @@ fonctionnelle (chaque état stable est aussi marqué par un tag Git, ex: `v1.0`)
 
 ## Pistes d'évolution
 
-- WebSocket pour les messages en temps réel (au lieu du polling manuel)
 - Pagination du fil et de la recherche
-- Upload d'images (posts avec médias)
 - Notifications (nouveaux followers, likes, messages)
 - Déploiement : Postgres au lieu de SQLite pour la production,
   reverse-proxy (nginx) devant uvicorn, HTTPS

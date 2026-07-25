@@ -3,6 +3,11 @@
 *.db
 *.db-journal
 
+# --- Images uploadées ---
+# Contenu propre à chaque environnement, comme la base de données.
+backend/uploads/*
+!backend/uploads/.gitkeep
+
 # --- Extension C compilée ---
 # Le .so est régénéré par `python3 setup.py build_ext --inplace` (voir run.sh).
 # Le versionner créerait des conflits binaires illisibles entre machines/OS différents.

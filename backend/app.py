@@ -6,10 +6,11 @@ Lancer avec : uvicorn app:app --reload --port 8000
 import sys
 import os
 import datetime
+import uuid
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "c_ext"))
 
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Form, File, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -27,6 +28,53 @@ except ImportError:
     )
 
 app = FastAPI(title="Réseau social terminal")
+
+# ---------- Stockage des images jointes aux posts ----------
+# Les fichiers uploadés sont stockés tels quels sur disque (pas en base),
+# dans backend/uploads/. Ce dossier est hors Git (voir .gitignore) : le
+# contenu uploadé est propre à chaque environnement, comme la base SQLite.
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Seuls ces types MIME sont acceptés. On se base sur le Content-Type déclaré
+# par le navigateur (pas sur le nom de fichier envoyé par le client, qui
+# n'est jamais fiable) pour choisir l'extension du fichier stocké.
+ALLOWED_IMAGE_TYPES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 Mo
+
+
+async def _save_uploaded_image(image: UploadFile) -> str:
+    """Valide et enregistre une image uploadée, renvoie son nom de fichier.
+
+    - Le type de fichier est vérifié contre une liste blanche (pas de .exe,
+      .php, etc. déguisés en image).
+    - Le nom de fichier final est généré aléatoirement (UUID) : on ignore
+      totalement le nom envoyé par le client, ce qui élimine tout risque de
+      "path traversal" (ex: un nom de fichier contenant "../../").
+    - La taille est plafonnée à MAX_IMAGE_SIZE pour éviter qu'un upload
+      énorme ne sature le disque ou la mémoire du serveur.
+    """
+    if image.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="Format d'image non supporté (formats acceptés : PNG, JPEG, GIF, WEBP).",
+        )
+    data = await image.read()
+    if len(data) > MAX_IMAGE_SIZE:
+        raise HTTPException(status_code=400, detail="Image trop volumineuse (5 Mo maximum).")
+    if len(data) == 0:
+        raise HTTPException(status_code=400, detail="Fichier image vide.")
+
+    filename = uuid.uuid4().hex + ALLOWED_IMAGE_TYPES[image.content_type]
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    with open(filepath, "wb") as f:
+        f.write(data)
+    return filename
 
 
 def now() -> str:
@@ -115,7 +163,10 @@ class LoginIn(BaseModel):
 
 
 class PostIn(BaseModel):
-    """Corps attendu pour POST /api/posts (création d'une publication)."""
+    """Conservé pour référence/documentation : POST /api/posts n'utilise
+    plus ce schéma JSON directement depuis l'ajout de l'upload d'image, car
+    un formulaire multipart (texte + fichier) est nécessaire pour envoyer un
+    fichier. Voir la signature de `create_post` (paramètres Form/File)."""
     content: str = Field(min_length=1, max_length=1000)
 
 
@@ -191,6 +242,7 @@ def _serialize_post(conn, row, current_user_id):
     ).fetchone() is not None
     comment_count = conn.execute("SELECT COUNT(*) c FROM comments WHERE post_id = ?", (row["id"],)).fetchone()["c"]
     author = conn.execute("SELECT username FROM users WHERE id = ?", (row["user_id"],)).fetchone()["username"]
+    image_path = row["image_path"] if "image_path" in row.keys() else None
     return {
         "id": row["id"],
         "author": author,
@@ -199,26 +251,41 @@ def _serialize_post(conn, row, current_user_id):
         "likes": likes,
         "liked_by_me": liked,
         "comments": comment_count,
+        "image_url": f"/uploads/{image_path}" if image_path else None,
     }
 
 
 @app.post("/api/posts")
-async def create_post(body: PostIn, user=Depends(get_current_user)):
-    """Publie un nouveau post pour l'utilisateur connecté.
+async def create_post(
+    content: str = Form(..., min_length=1, max_length=1000),
+    image: UploadFile | None = File(None),
+    user=Depends(get_current_user),
+):
+    """Publie un nouveau post pour l'utilisateur connecté, avec une image
+    optionnelle jointe.
+
+    Reçu en `multipart/form-data` (et non JSON) car c'est le seul format
+    HTTP standard permettant d'envoyer du texte ET un fichier binaire dans
+    la même requête. Voir `_save_uploaded_image` pour les validations de
+    sécurité appliquées à l'image (type, taille, nom de fichier).
 
     Insère en base ET indexe le texte dans le moteur de recherche C dans la
     même opération : un post créé est immédiatement trouvable par `search`.
     Notifie aussi en temps réel (WebSocket) les followers actuellement
     connectés, pour que leur fil se mette à jour sans action de leur part.
     """
+    image_filename = None
+    if image is not None and image.filename:
+        image_filename = await _save_uploaded_image(image)
+
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO posts (user_id, content, created_at) VALUES (?, ?, ?)",
-            (user["id"], body.content, now()),
+            "INSERT INTO posts (user_id, content, created_at, image_path) VALUES (?, ?, ?, ?)",
+            (user["id"], content, now(), image_filename),
         )
         conn.commit()
         post_id = cur.lastrowid
-        searchengine.index_add(post_id, body.content)
+        searchengine.index_add(post_id, content)
         row = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
         serialized = _serialize_post(conn, row, user["id"])
         follower_ids = [
@@ -494,6 +561,7 @@ def search(q: str, user=Depends(get_current_user)):
 
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 
 @app.get("/")
