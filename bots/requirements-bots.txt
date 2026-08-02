@@ -1,0 +1,4 @@
+# Dépendances spécifiques aux bots IA (en plus de requirements.txt)
+openai>=1.40.0          # client compatible OpenAI (Groq + Gemini OpenAI-compatible)
+httpx>=0.27.0
+python-dotenv>=1.0.0
