@@ -214,19 +214,27 @@ def make_groq_client() -> OpenAI:
     )
 
 
-def make_gemini_client() -> OpenAI:
-    if not GEMINI_API_KEY:
-        raise SystemExit(
-            "GEMINI_API_KEY manquant.\n"
-            "1. Va sur https://aistudio.google.com/apikey\n"
-            "2. Crée une clé (gratuit, pas de carte)\n"
-            "3. Mets-la dans bots/.env"
+def make_echo_client() -> tuple[OpenAI, str]:
+    """Retourne (client, model_name) pour @echo.
+
+    - Si GEMINI_API_KEY est présent → Gemini
+    - Sinon → même compte Groq avec un modèle plus léger (mode 100% Groq)
+    """
+    if GEMINI_API_KEY:
+        client = OpenAI(
+            api_key=GEMINI_API_KEY,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         )
-    # Endpoint OpenAI-compatible de Google
-    return OpenAI(
-        api_key=GEMINI_API_KEY,
-        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        return client, GEMINI_MODEL
+
+    print("  ℹ  Pas de clé Gemini → @echo tourne aussi sur Groq (modèle différent)")
+    client = OpenAI(
+        api_key=GROQ_API_KEY,
+        base_url="https://api.groq.com/openai/v1",
     )
+    # Modèle plus petit pour diversifier le style et économiser le quota
+    model = os.getenv("ECHO_GROQ_MODEL", "llama-3.1-8b-instant")
+    return client, model
 
 
 def llm_reply(client: OpenAI, model: str, system: str, history: list[dict], user_msg: str) -> str:
@@ -256,13 +264,16 @@ def llm_reply(client: OpenAI, model: str, system: str, history: list[dict], user
 def main():
     print("=== SocialNet Agents — lancés dans l'inconnu ===\n")
 
-    if not GROQ_API_KEY or not GEMINI_API_KEY:
-        print("Il manque au moins une clé API.")
-        print("Copie bots/.env.example vers bots/.env et remplis GROQ_API_KEY + GEMINI_API_KEY\n")
+    if not GROQ_API_KEY:
+        print("GROQ_API_KEY manquant.")
+        print("Mets ta clé Groq dans bots/.env\n")
         sys.exit(1)
 
+    if not GEMINI_API_KEY:
+        print("Mode 100% Groq activé (Gemini indisponible dans ton pays).\n")
+
     groq = make_groq_client()
-    gemini = make_gemini_client()
+    echo_llm, echo_model = make_echo_client()
 
     nova = SocialNetClient(SOCIALNET_URL)
     echo = SocialNetClient(SOCIALNET_URL)
@@ -330,7 +341,7 @@ def main():
                 "si l'idée te semble assez forte (dans ce cas commence ta réponse par POST: "
                 "suivi du texte du post, sinon réponds juste normalement)."
             )
-            reply_echo = llm_reply(gemini, GEMINI_MODEL, SYSTEM_PROMPTS["echo"], history_echo, prompt_echo)
+            reply_echo = llm_reply(echo_llm, echo_model, SYSTEM_PROMPTS["echo"], history_echo, prompt_echo)
             if not reply_echo:
                 continue
 
