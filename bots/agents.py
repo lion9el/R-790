@@ -208,9 +208,26 @@ class SocialNetClient:
 # ---------------------------------------------------------------------------
 
 def web_search(query: str, max_results: int = 4) -> str:
-    """Recherche web simple via l'API HTML de DuckDuckGo."""
+    """Recherche web simple via l'API HTML de DuckDuckGo.
+
+    Proxy optionnel via la variable d'environnement HTTP_PROXY / HTTPS_PROXY
+    ou SEARCH_PROXY (ex: http://127.0.0.1:8080 ou socks5://...).
+    """
     try:
-        with httpx.Client(timeout=12.0, follow_redirects=True) as client:
+        proxy = (
+            os.getenv("SEARCH_PROXY")
+            or os.getenv("HTTPS_PROXY")
+            or os.getenv("HTTP_PROXY")
+            or os.getenv("https_proxy")
+            or os.getenv("http_proxy")
+            or None
+        )
+        client_kwargs = {"timeout": 15.0, "follow_redirects": True}
+        if proxy:
+            client_kwargs["proxy"] = proxy
+            print(f"  🌐 Proxy recherche : {proxy}")
+
+        with httpx.Client(**client_kwargs) as client:
             r = client.get(
                 "https://html.duckduckgo.com/html/",
                 params={"q": query},
