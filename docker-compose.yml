@@ -1,0 +1,25 @@
+# SocialNet — démarrage local / production simple
+#
+# Usage :
+#   docker compose up --build
+#   Puis ouvrir http://localhost:8000
+#
+# En production, définissez absolument SOCIALNET_SECRET
+# (voir .env.example) et montez un volume pour la base + uploads.
+
+services:
+  socialnet:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # OBLIGATOIRE en production. Générez une valeur forte avec :
+      #   python3 -c "import secrets; print(secrets.token_hex(32))"
+      - SOCIALNET_SECRET=${SOCIALNET_SECRET:-change-moi-avant-la-production}
+    volumes:
+      # Persistance de la base SQLite et des images uploadées
+      - socialnet-data:/app/backend
+    restart: unless-stopped
+
+volumes:
+  socialnet-data:

@@ -108,7 +108,8 @@ fonctionnelle (chaque état stable est aussi marqué par un tag Git, ex: `v1.0`)
 
 ## Pistes d'évolution
 
-- Notification quand quelqu'un commente ton post (actuellement : likes/follows/messages/mentions)
 - Blocage d'utilisateur
 - Déploiement : Postgres au lieu de SQLite pour la production,
   reverse-proxy (nginx) devant uvicorn, HTTPS
+- Externaliser le JS/CSS du frontend pour une CSP encore plus stricte
+  (suppression de 'unsafe-inline')

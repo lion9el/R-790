@@ -69,14 +69,14 @@ CREATE TABLE IF NOT EXISTS notifications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     -- Destinataire de la notification (celui qui la voit).
     user_id INTEGER NOT NULL,
-    -- 'like' | 'follow' | 'message' | 'mention'
+    -- 'like' | 'follow' | 'message' | 'mention' | 'comment'
     type TEXT NOT NULL,
     -- Auteur de l'action qui a déclenché la notification (celui qui like,
     -- suit, envoie le message, ou mentionne). Stocké par nom d'utilisateur
     -- plutôt que par id pour rester lisible même si on veut inspecter la
     -- table à la main.
     from_username TEXT NOT NULL,
-    -- Post concerné : pour 'like' et 'mention' (post où la mention a lieu,
+    -- Post concerné : pour 'like', 'comment' et 'mention' (post où la mention a lieu,
     -- que la mention soit dans le post lui-même ou dans un commentaire dessus).
     post_id INTEGER,
     -- Court extrait du contenu, utilisé pour les notifications de type

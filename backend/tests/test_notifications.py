@@ -119,3 +119,46 @@ def test_deleting_post_removes_its_notifications(client, register):
 
 def test_notifications_require_authentication(client):
     assert client.get("/api/notifications").status_code == 401
+
+
+def test_comment_creates_notification_for_post_author(client, register):
+    alice_headers, _ = register("alice")
+    bob_headers, _ = register("bob")
+    post_id = _create_post(client, alice_headers)
+    client.post(
+        f"/api/posts/{post_id}/comments",
+        json={"content": "super post !"},
+        headers=bob_headers,
+    )
+
+    notifs = client.get("/api/notifications", headers=alice_headers).json()
+    assert len(notifs) == 1
+    assert notifs[0]["type"] == "comment"
+    assert notifs[0]["from"] == "bob"
+    assert notifs[0]["post_id"] == post_id
+    assert "super post" in notifs[0]["content"]
+
+
+def test_self_comment_creates_no_notification(client, register):
+    headers, _ = register("alice")
+    post_id = _create_post(client, headers)
+    client.post(
+        f"/api/posts/{post_id}/comments",
+        json={"content": "commentaire sur mon propre post"},
+        headers=headers,
+    )
+    assert client.get("/api/notifications", headers=headers).json() == []
+
+
+def test_comment_notification_preview_is_truncated(client, register):
+    alice_headers, _ = register("alice")
+    bob_headers, _ = register("bob")
+    post_id = _create_post(client, alice_headers)
+    long_text = "y" * 200
+    client.post(
+        f"/api/posts/{post_id}/comments",
+        json={"content": long_text},
+        headers=bob_headers,
+    )
+    content = client.get("/api/notifications", headers=alice_headers).json()[0]["content"]
+    assert content == "y" * 120 + "…"

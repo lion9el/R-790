@@ -140,9 +140,13 @@ def test_mention_in_comment_creates_notification(client, register):
     client.post(f"/api/posts/{post_id}/comments", json={"content": "regarde ça @alice"}, headers=bob_headers)
 
     notifs = client.get("/api/notifications", headers=alice_headers).json()
-    assert len(notifs) == 1
-    assert notifs[0]["type"] == "mention"
-    assert notifs[0]["post_id"] == post_id
+    # Deux notifications attendues : une de type "comment" (auteur du post)
+    # et une de type "mention" (parce que @alice apparaît dans le commentaire).
+    assert len(notifs) == 2
+    types = {n["type"] for n in notifs}
+    assert types == {"comment", "mention"}
+    assert all(n["post_id"] == post_id for n in notifs)
+    assert all(n["from"] == "bob" for n in notifs)
 
 
 def test_multiple_mentions_in_one_post_notify_each_once(client, register):

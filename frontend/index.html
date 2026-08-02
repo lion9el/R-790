@@ -326,6 +326,7 @@ function formatNotification(n) {
   if (n.type === "follow") return `➕ @${n.from} te suit maintenant — ${when}`;
   if (n.type === "message") return `💬 @${n.from} t'a envoyé un message : ${n.content} — ${when}`;
   if (n.type === "mention") return `📣 @${n.from} t'a mentionné (post #${n.post_id}) : ${n.content} — ${when}`;
+  if (n.type === "comment") return `💬 @${n.from} a commenté ton post #${n.post_id} : ${n.content || ''} — ${when}`;
   return `🔔 notification de @${n.from} — ${when}`;
 }
 

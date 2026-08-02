@@ -17,6 +17,10 @@ from contextlib import asynccontextmanager
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "c_ext"))
 
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Form, File, UploadFile, Header
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -108,6 +112,41 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Réseau social terminal", lifespan=lifespan)
 
+# ---------- En-têtes de sécurité HTTP ----------
+# Dernier point ouvert de l'audit sécurité v1.4. Ces en-têtes réduisent
+# fortement la surface d'attaque côté navigateur (clickjacking, XSS, MIME
+# sniffing, etc.). Content-Security-Policy est volontairement stricte :
+# le frontend est une page unique sans CDN externe ni inline scripts
+# dynamiques non contrôlés.
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response: Response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+        # CSP : scripts et styles uniquement depuis la même origine.
+        # 'unsafe-inline' est nécessaire pour le style et le JS embarqués
+        # dans index.html (page unique sans bundler). Améliorable plus tard
+        # en externalisant le JS/CSS.
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; "
+            "connect-src 'self' ws: wss:; "
+            "frame-ancestors 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'"
+        )
+        # HSTS uniquement utile derrière HTTPS ; on le met quand même pour
+        # les déploiements qui terminent TLS devant (nginx, Cloudflare…).
+        if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
+
 # ---------- Stockage des images jointes aux posts ----------
 # Les fichiers uploadés sont stockés tels quels sur disque (pas en base),
 # dans backend/uploads/. Ce dossier est hors Git (voir .gitignore) : le
@@ -128,6 +167,7 @@ ALLOWED_IMAGE_TYPES = {
     "image/webp": (".webp", "WEBP"),
 }
 MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 Mo
+MAX_IMAGE_DIMENSION = 4096  # largeur ou hauteur max (px) — protège contre les bombes de décompression
 UPLOAD_CHUNK_SIZE = 64 * 1024  # taille des blocs lus depuis le flux réseau
 
 # Délai laissé au client pour envoyer son message d'authentification une
@@ -193,6 +233,7 @@ async def _save_uploaded_image(image: UploadFile) -> str:
         # pouvoir encore lire son format détecté juste après.
         with Image.open(io.BytesIO(data)) as reopened:
             actual_format = reopened.format
+            width, height = reopened.size
     except (UnidentifiedImageError, OSError, ValueError):
         raise HTTPException(status_code=400, detail="Le fichier envoyé n'est pas une image valide.")
 
@@ -203,6 +244,12 @@ async def _save_uploaded_image(image: UploadFile) -> str:
                 f"Le contenu du fichier ({actual_format or 'format inconnu'}) ne correspond pas "
                 f"au type déclaré ({expected_format})."
             ),
+        )
+
+    if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Image trop grande ({width}x{height}). Maximum {MAX_IMAGE_DIMENSION}px de côté.",
         )
 
     filename = uuid.uuid4().hex + extension
@@ -949,14 +996,13 @@ def delete_post(post_id: int, user=Depends(get_current_user)):
 async def add_comment(post_id: int, body: CommentIn, user=Depends(get_current_user)):
     """Ajoute un commentaire de l'utilisateur courant sur un post existant.
 
-    Une mention (@pseudo) valide dans le commentaire déclenche une
-    notification pour la personne visée, au même titre qu'une mention dans
-    un post (voir _create_mention_notifications) — `post_id` sert de
-    référence pour retrouver le contexte (le post commenté), le commentaire
-    lui-même n'a pas d'identité propre dans les notifications.
+    - Notifie l'auteur du post (sauf auto-commentaire) via une notification
+      de type `comment` (persistée + push temps réel).
+    - Une mention (@pseudo) valide dans le commentaire déclenche en plus
+      une notification pour la personne visée (voir _create_mention_notifications).
     """
     with get_conn() as conn:
-        post = conn.execute("SELECT id FROM posts WHERE id = ?", (post_id,)).fetchone()
+        post = conn.execute("SELECT id, user_id FROM posts WHERE id = ?", (post_id,)).fetchone()
         if not post:
             raise HTTPException(status_code=404, detail="Post introuvable.")
         conn.execute(
@@ -964,10 +1010,26 @@ async def add_comment(post_id: int, body: CommentIn, user=Depends(get_current_us
             (post_id, user["id"], body.content, now()),
         )
         conn.commit()
+
+        # Notification à l'auteur du post (sauf s'il commente son propre post)
+        comment_notification = None
+        if post["user_id"] != user["id"]:
+            # On stocke un aperçu du commentaire (tronqué) pour l'affichage
+            preview = body.content[:120] + ("…" if len(body.content) > 120 else "")
+            comment_notification = _create_notification(
+                conn, post["user_id"], "comment", user["username"],
+                post_id=post_id, content=preview,
+            )
+
         mention_notifications = _create_mention_notifications(
             conn, body.content, post_id, user["id"], user["username"]
         )
 
+    if comment_notification:
+        await manager.send_to_user(
+            post["user_id"],
+            {"type": "notification", "notification": comment_notification},
+        )
     for target_id, notification in mention_notifications:
         await manager.send_to_user(target_id, {"type": "notification", "notification": notification})
     return {"ok": True}

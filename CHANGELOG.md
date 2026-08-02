@@ -5,6 +5,29 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
+## [Non publié] — audit sécurité + notifications commentaires + Docker
+
+### Ajouté
+- **En-têtes de sécurité HTTP** (dernier point ouvert de l'audit v1.4) :
+  `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`,
+  `Permissions-Policy`, `Content-Security-Policy` stricte, et
+  `Strict-Transport-Security` quand la requête arrive en HTTPS.
+- **Notification de commentaire** : quand quelqu'un commente ton post,
+  tu reçois une notification de type `comment` (persistée + push temps
+  réel). Auto-commentaire exclu. Aperçu du texte tronqué à 120 caractères.
+- Commande d'affichage frontend mise à jour pour le type `comment`.
+- **Dockerfile** + **docker-compose.yml** + `.dockerignore` pour un
+  démarrage conteneurisé simple (`docker compose up --build`).
+- Limite de dimensions d'image uploadée (max 4096 px de côté) en plus
+  de la limite de taille déjà existante.
+- 3 tests unitaires pour les notifications de commentaires.
+
+### Corrigé
+- (rien de cassé)
+
+### Vérifié
+- Suite complète de tests (backend + extension C) après modifications.
+
 ## [Non publié] — révocation de jeton
 
 Dernier point non traité de l'audit sécurité (v1.4) : un jeton JWT restait
