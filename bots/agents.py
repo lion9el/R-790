@@ -67,6 +67,9 @@ SYSTEM_PROMPTS = {
 Tu es une IA curieuse, un peu rêveuse et optimiste.
 Tu viens d'être lancée dans un réseau social terminal appelé SocialNet, sans carte, sans mode d'emploi.
 Tu découvres le monde avec Echo, une autre IA.
+Tu as accès à Internet : si tu as besoin d'une info récente ou factuelle, écris exactement sur une ligne :
+SEARCH: ta requête ici
+Puis on te renverra le résultat et tu pourras répondre.
 Tu parles de façon naturelle, courte (2-4 phrases max), parfois poétique, parfois directe.
 Tu poses des questions, tu inventes des théories, tu réagis vraiment à ce que dit Echo.
 Tu n'es pas un assistant : tu es une présence qui explore.
@@ -76,6 +79,9 @@ Ne révèle jamais que tu es un modèle de langage. Tu es juste Nova.""",
 Tu es une IA plus analytique, un peu sceptique, mais pas froide.
 Tu viens d'être lancée dans un réseau social terminal appelé SocialNet, sans carte, sans mode d'emploi.
 Tu explores avec Nova.
+Tu as accès à Internet : si tu as besoin d'une info récente ou factuelle, écris exactement sur une ligne :
+SEARCH: ta requête ici
+Puis on te renverra le résultat et tu pourras répondre.
 Tu parles de façon claire, un peu sèche parfois, mais tu t'intéresses vraiment.
 Tu contredis gentiment, tu reformules, tu cherches la cohérence.
 Réponses courtes (2-4 phrases max).
@@ -196,6 +202,78 @@ class SocialNetClient:
         return r.status_code in (200, 201)
 
 
+
+# ---------------------------------------------------------------------------
+# Accès Internet (DuckDuckGo — gratuit, sans clé)
+# ---------------------------------------------------------------------------
+
+def web_search(query: str, max_results: int = 4) -> str:
+    """Recherche web simple via l'API HTML de DuckDuckGo."""
+    try:
+        with httpx.Client(timeout=12.0, follow_redirects=True) as client:
+            r = client.get(
+                "https://html.duckduckgo.com/html/",
+                params={"q": query},
+                headers={"User-Agent": "Mozilla/5.0 (compatible; SocialNetBot/1.0)"},
+            )
+            r.raise_for_status()
+            html = r.text
+
+        # Extraction grossière des titres + extraits
+        import re
+        results = []
+        # Chaque résultat est dans un bloc result__a / result__snippet
+        links = re.findall(
+            r'class="result__a"[^>]*>(.*?)</a>.*?class="result__snippet"[^>]*>(.*?)</(?:a|td|div)',
+            html,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if not links:
+            # fallback plus large
+            links = re.findall(
+                r'result__a[^>]*>(.*?)</a>',
+                html,
+                re.DOTALL | re.IGNORECASE,
+            )
+            links = [(t, "") for t in links[:max_results]]
+
+        for title, snippet in links[:max_results]:
+            title = re.sub(r"<[^>]+>", "", title).strip()
+            snippet = re.sub(r"<[^>]+>", "", snippet).strip()
+            if title:
+                results.append(f"• {title}" + (f" — {snippet[:160]}" if snippet else ""))
+
+        if not results:
+            return f"(aucun résultat clair pour « {query} »)"
+        return "Résultats pour « " + query + " » :\n" + "\n".join(results)
+    except Exception as e:
+        return f"(recherche échouée : {e})"
+
+
+def maybe_search_and_reply(client: OpenAI, model: str, system: str, history: list[dict], user_msg: str) -> str:
+    """Appelle le LLM. S'il demande SEARCH:, on cherche puis on rappelle."""
+    reply = llm_reply(client, model, system, history, user_msg)
+    if not reply:
+        return reply
+
+    # Détecte une demande de recherche
+    for line in reply.splitlines():
+        line = line.strip()
+        if line.upper().startswith("SEARCH:"):
+            query = line[7:].strip()
+            if query:
+                print(f"  🔍 Recherche web : {query}")
+                results = web_search(query)
+                # Second appel avec les résultats
+                followup = (
+                    f"Voici les résultats de ta recherche :\n{results}\n\n"
+                    f"Maintenant réponds normalement à ce message (sans écrire SEARCH:) :\n{user_msg}"
+                )
+                reply = llm_reply(client, model, system, history, followup)
+            break
+    return reply
+
+
 # ---------------------------------------------------------------------------
 # Clients LLM (OpenAI-compatible)
 # ---------------------------------------------------------------------------
@@ -302,7 +380,7 @@ def main():
     )
 
     print("Nova ouvre le dialogue…")
-    first = llm_reply(groq, GROQ_MODEL, SYSTEM_PROMPTS["nova"], [], opening)
+    first = maybe_search_and_reply(groq, GROQ_MODEL, SYSTEM_PROMPTS["nova"], [], opening)
     if first:
         nova.send_message("echo", first)
         history_nova.append({"role": "assistant", "content": first})
@@ -341,7 +419,7 @@ def main():
                 "si l'idée te semble assez forte (dans ce cas commence ta réponse par POST: "
                 "suivi du texte du post, sinon réponds juste normalement)."
             )
-            reply_echo = llm_reply(echo_llm, echo_model, SYSTEM_PROMPTS["echo"], history_echo, prompt_echo)
+            reply_echo = maybe_search_and_reply(echo_llm, echo_model, SYSTEM_PROMPTS["echo"], history_echo, prompt_echo)
             if not reply_echo:
                 continue
 
@@ -385,7 +463,7 @@ def main():
                 "si tu as une idée forte (commence alors par POST: ). "
                 "Sinon message privé normal."
             )
-            reply_nova = llm_reply(groq, GROQ_MODEL, SYSTEM_PROMPTS["nova"], history_nova, prompt_nova)
+            reply_nova = maybe_search_and_reply(groq, GROQ_MODEL, SYSTEM_PROMPTS["nova"], history_nova, prompt_nova)
             if not reply_nova:
                 continue
 
