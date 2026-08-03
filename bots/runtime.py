@@ -230,6 +230,18 @@ def client():
     return OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
 
 
+def _parse_retry_wait(msg: str) -> Optional[float]:
+    """Parse le délai suggéré par Groq, ex: 'try again in 20m18.24s' ou 'try again in 29.88s'.
+    Le format peut inclure des minutes ; les ignorer faisait attendre ~18s au lieu de ~20min
+    et provoquait un spam de retries inutiles pour un quota qui ne se réinitialise que bien plus tard."""
+    m = re.search(r"try again in(?: (\d+)m)?\s*([\d.]+)s", msg)
+    if not m:
+        return None
+    minutes = float(m.group(1) or 0)
+    seconds = float(m.group(2))
+    return minutes * 60 + seconds
+
+
 def llm(c, model, system, user, bot_name="?", _retry=0) -> str:
     if budget_exhausted():
         log(f"  ⛔ Budget tokens atteint ({MAX_TOKENS_BUDGET}, scope={BUDGET_SCOPE}). Stop soft.")
@@ -249,15 +261,32 @@ def llm(c, model, system, user, bot_name="?", _retry=0) -> str:
     except Exception as e:
         msg = str(e)
         is_rate_limit = "429" in msg or "rate_limit" in msg.lower()
-        if is_rate_limit and _retry < 4:
-            # Essaie d'extraire le délai suggéré par l'API ("try again in 29.88s")
-            wait_s = 5.0 * (2 ** _retry)
-            m = re.search(r"try again in ([\d.]+)s", msg)
-            if m:
-                wait_s = float(m.group(1)) + 1.0
-            log(f"  ⏳ {bot_name} rate-limit, retry #{_retry+1} dans {wait_s:.0f}s")
-            time.sleep(wait_s)
+        if not is_rate_limit:
+            log(f"  [LLM error {bot_name}] {e}")
+            time.sleep(3)
+            return ""
+
+        wait_s = _parse_retry_wait(msg)
+        is_daily = "per day" in msg.lower() or "tpd" in msg.lower()
+
+        if is_daily and wait_s:
+            # Quota journalier : inutile de retenter 4 fois en rafale, ça ne se réinitialisera
+            # pas avant `wait_s`. Une seule longue attente (plafonnée) plutôt qu'un spam de logs.
+            capped = min(wait_s + 5.0, 45 * 60)
+            log(f"  😴 {bot_name} quota journalier atteint, pause {capped/60:.1f} min avant nouvel essai")
+            time.sleep(capped)
+            if _retry < 1:
+                return llm(c, model, system, user, bot_name, _retry=_retry + 1)
+            log(f"  [LLM error {bot_name}] toujours limité après attente : {e}")
+            return ""
+
+        if _retry < 4:
+            # Limite courte (par minute) : backoff classique, on utilise le délai suggéré si présent.
+            wait = wait_s + 1.0 if wait_s else 5.0 * (2 ** _retry)
+            log(f"  ⏳ {bot_name} rate-limit, retry #{_retry+1} dans {wait:.0f}s")
+            time.sleep(wait)
             return llm(c, model, system, user, bot_name, _retry=_retry + 1)
+
         log(f"  [LLM error {bot_name}] {e}")
         time.sleep(3)
         return ""
@@ -294,6 +323,27 @@ def web_search(query: str) -> str:
 
 
 ACTIONS = "speak | message | post | like | comment | search | remember | create | rule | wait | journal | explore | write_repo | read_repo"
+
+
+def resolve_peer(target: str, others: list[str]) -> str:
+    """Résout un nom de cible vers un bot connu, en tolérant les petites fautes de frappe
+    du LLM (ex: '@nov' au lieu de 'nova'). Retourne '' si rien de raisonnable ne correspond
+    et qu'aucun fallback aléatoire n'est souhaité par l'appelant (voir usages)."""
+    t = (target or "").lstrip("@+").strip().lower()
+    if not t:
+        return ""
+    for o in others:
+        if o.lower() == t:
+            return o
+    import difflib
+    match = difflib.get_close_matches(t, [o.lower() for o in others], n=1, cutoff=0.6)
+    if match:
+        return next(o for o in others if o.lower() == match[0])
+    # préfixe/sous-chaîne (couvre '@nov' -> 'nova')
+    for o in others:
+        if o.lower().startswith(t) or t.startswith(o.lower()):
+            return o
+    return ""
 
 
 def cycle(bot: str, sn: SN, c: OpenAI, model: str, others: list[str]):
@@ -446,7 +496,7 @@ def cycle(bot: str, sn: SN, c: OpenAI, model: str, others: list[str]):
         return
 
     if action == "message":
-        to = target.lstrip("@") if target else (random.choice(others) if others else "")
+        to = resolve_peer(target, others) if target else (random.choice(others) if others else "")
         text = content or "..."
         if to:
             sn.msg(to, text[:500])
@@ -491,6 +541,11 @@ def cycle(bot: str, sn: SN, c: OpenAI, model: str, others: list[str]):
 
     if action == "write_repo":
         relpath = (target or "notes/agent-zero/notes.md").strip()
+        # Le modèle propose parfois un dossier ('notes/agent-zero/') plutôt qu'un fichier précis.
+        # On complète avec un nom par défaut basé sur l'horodatage plutôt que planter sur "Is a directory".
+        if not relpath or relpath.endswith("/") or "." not in Path(relpath).name:
+            stamp = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+            relpath = f"{relpath.rstrip('/')}/{bot}-{stamp}.md" if relpath.rstrip("/") else f"notes/agent-zero/{bot}-{stamp}.md"
         text = content or thought[:500] or "(vide)"
         try:
             rel = ghub.write_file(relpath, text, bot)
@@ -531,7 +586,7 @@ def cycle(bot: str, sn: SN, c: OpenAI, model: str, others: list[str]):
 
     # default speak / message random peer
     text = content or thought[:240] or "..."
-    peer = target.lstrip("@") if target in others or target.lstrip("@") in others else (random.choice(others) if others else "")
+    peer = resolve_peer(target, others) if target else (random.choice(others) if others else "")
     if peer:
         sn.msg(peer, text[:500])
         mem.update_relationship(bot, peer, 0.02, text[:60])

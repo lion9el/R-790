@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 import datetime
 from pathlib import Path
 
@@ -95,22 +96,24 @@ def commit_and_push(message: str, bot: str = "bot") -> str:
         return "rien à committer"
     msg = f"{message} (by @{bot})"
     _git(["commit", "-m", msg], check=False)
-    # push with token url
+    # push with token url, avec un retry sur coupure réseau/DNS transitoire
     t = _token()
-    if t:
+    push_args = ["push", _auth_url(), "main"] if t else ["push", "origin", "main"]
+    for attempt in range(2):
         r = subprocess.run(
-            ["git", "push", _auth_url(), "main"],
+            ["git", *push_args],
             cwd=str(WORK_DIR),
             capture_output=True,
             text=True,
         )
-        if r.returncode != 0:
-            return f"push erreur: {r.stderr[:200]}"
-        return f"push ok: {msg}"
-    r = _git(["push", "origin", "main"], check=False)
-    if r.returncode != 0:
+        if r.returncode == 0:
+            return f"push ok: {msg}"
+        transient = "Could not resolve host" in r.stderr or "Connection" in r.stderr or "timed out" in r.stderr
+        if transient and attempt == 0:
+            time.sleep(5)
+            continue
         return f"push erreur: {r.stderr[:200]}"
-    return f"push ok: {msg}"
+    return f"push erreur: échec après retry"
 
 
 def list_files(subdir: str = "") -> list[str]:
