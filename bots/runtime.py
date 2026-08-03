@@ -495,7 +495,7 @@ def main():
     print("  ✓ mémoire permanente + mission AGENT-ZERO")
     try:
         sr = agent_sync.full_sync()
-        print(f"  ✓ sync: files={sr.get(\"files_indexed\")} broadcast={sr.get(\"facts_broadcast\")}")
+        print(f"  ✓ sync: files={sr.get('files_indexed')} broadcast={sr.get('facts_broadcast')}")
     except Exception as e:
         print(f"  ⚠ sync init: {e}")
     print(f"World  : {mem.WORLD_DIR}")
