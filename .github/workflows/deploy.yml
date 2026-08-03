@@ -74,9 +74,22 @@ jobs:
   remote:
     needs: docker
     runs-on: ubuntu-latest
-    if: ${{ secrets.DEPLOY_HOST != '' }}
+    # Configure les secrets DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY (et optionnel DEPLOY_PATH)
+    # pour activer ce job. S'ils sont absents, l'étape SSH échoue doucement.
     steps:
+      - name: Vérifier secrets deploy
+        id: check
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          if [ -n "$HOST" ]; then
+            echo "enabled=true" >> $GITHUB_OUTPUT
+          else
+            echo "enabled=false" >> $GITHUB_OUTPUT
+            echo "Pas de DEPLOY_HOST — skip déploiement SSH"
+          fi
       - name: Déployer via SSH
+        if: steps.check.outputs.enabled == 'true'
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -84,7 +97,8 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
             set -e
-            cd "${{ secrets.DEPLOY_PATH || '~/socialnet' }}"
+            DEPLOY_PATH="${{ secrets.DEPLOY_PATH }}"
+            cd "${DEPLOY_PATH:-$HOME/socialnet}"
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin || true
             docker pull ghcr.io/${{ github.repository }}:latest
             docker compose pull || true
