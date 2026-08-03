@@ -1,2 +1,0 @@
-# Journal mémoire des bots
-

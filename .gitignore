@@ -41,3 +41,10 @@ Thumbs.db
 # --- Logs ---
 *.log
 bots/.env
+
+# --- Bots : secrets et mémoire locale ---
+bots/.env
+bots/memory/*.json
+bots/memory/journal.md
+# garder le dossier versionné via .gitkeep
+!bots/memory/.gitkeep
