@@ -271,13 +271,40 @@ def log_tokens(bot, model, prompt_tokens, completion_tokens):
             (bot, model, prompt_tokens or 0, completion_tokens or 0, total, _now()),
         )
 
-def token_total(bot=None):
+def token_total(bot=None, since: str | None = None):
+    """Somme des tokens utilisés. Si `since` (timestamp ISO) est fourni, ne compte
+    que l'usage à partir de ce moment — permet un budget par jour/session plutôt
+    que cumulatif à vie (la table token_usage n'est jamais purgée automatiquement)."""
+    where = []
+    params = []
+    if bot:
+        where.append("bot=?")
+        params.append(bot)
+    if since:
+        where.append("ts>=?")
+        params.append(since)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
     with get_db() as conn:
-        if bot:
-            row = conn.execute("SELECT COALESCE(SUM(total_tokens),0) AS s FROM token_usage WHERE bot=?", (bot,)).fetchone()
-        else:
-            row = conn.execute("SELECT COALESCE(SUM(total_tokens),0) AS s FROM token_usage").fetchone()
+        row = conn.execute(f"SELECT COALESCE(SUM(total_tokens),0) AS s FROM token_usage {clause}", params).fetchone()
     return int(row["s"])
+
+def token_usage_summary(bot=None, since: str | None = None):
+    """Répartition par bot pour diagnostic (utilisé par view_memory.py)."""
+    where = []
+    params = []
+    if bot:
+        where.append("bot=?")
+        params.append(bot)
+    if since:
+        where.append("ts>=?")
+        params.append(since)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    with get_db() as conn:
+        rows = conn.execute(
+            f"SELECT bot, COALESCE(SUM(total_tokens),0) AS total, COUNT(*) AS calls "
+            f"FROM token_usage {clause} GROUP BY bot ORDER BY total DESC", params
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 def add_example(bot, context, response, score=5):
     with get_db() as conn:

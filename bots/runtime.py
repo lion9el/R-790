@@ -33,7 +33,11 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 LIGHT_MODEL = os.getenv("ECHO_GROQ_MODEL", "llama-3.1-8b-instant")
 MIN_DELAY = float(os.getenv("BOT_MIN_DELAY", "30"))
 MAX_DELAY = float(os.getenv("BOT_MAX_DELAY", "90"))
-MAX_TOKENS_BUDGET = int(os.getenv("BOT_TOKEN_BUDGET", "200000"))  # stop global soft
+MAX_TOKENS_BUDGET = int(os.getenv("BOT_TOKEN_BUDGET", "200000"))  # stop soft, voir BOT_TOKEN_BUDGET_SCOPE
+# "run"      : le budget repart à zéro à chaque lancement du script (défaut le plus intuitif)
+# "day"      : le budget est partagé sur toute la journée UTC, même en relançant le script
+# "lifetime" : cumulatif pour toujours (comportement historique — se remplit vite si tu relances souvent)
+BUDGET_SCOPE = os.getenv("BOT_TOKEN_BUDGET_SCOPE", "run").strip().lower()
 SEARCH_PROXY = os.getenv("SEARCH_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
 
 BOT_CONFIG = {
@@ -46,6 +50,24 @@ _stop = threading.Event()
 _print_lock = threading.Lock()
 _sync_lock = threading.Lock()
 _sync_counter = 0
+RUN_START_TS = datetime.datetime.utcnow().isoformat() + "Z"
+
+
+def budget_epoch() -> Optional[str]:
+    """Retourne le timestamp ISO à partir duquel compter les tokens, selon BUDGET_SCOPE."""
+    if BUDGET_SCOPE == "lifetime":
+        return None
+    if BUDGET_SCOPE == "day":
+        return datetime.datetime.utcnow().strftime("%Y-%m-%dT00:00:00")
+    return RUN_START_TS  # "run" (défaut)
+
+
+def budget_used() -> int:
+    return mem.token_total(since=budget_epoch())
+
+
+def budget_exhausted() -> bool:
+    return budget_used() >= MAX_TOKENS_BUDGET
 
 
 def log(msg: str):
@@ -205,8 +227,8 @@ def client():
 
 
 def llm(c, model, system, user, bot_name="?", _retry=0) -> str:
-    if mem.token_total() >= MAX_TOKENS_BUDGET:
-        log(f"  ⛔ Budget tokens atteint ({MAX_TOKENS_BUDGET}). Stop soft.")
+    if budget_exhausted():
+        log(f"  ⛔ Budget tokens atteint ({MAX_TOKENS_BUDGET}, scope={BUDGET_SCOPE}). Stop soft.")
         _stop.set()
         return ""
     try:
@@ -272,6 +294,11 @@ ACTIONS = "speak | message | post | like | comment | search | remember | create 
 
 def cycle(bot: str, sn: SN, c: OpenAI, model: str, others: list[str]):
     """Un cycle autonome complet pour un bot."""
+    if budget_exhausted():
+        log(f"  ⛔ {bot} : budget déjà atteint (scope={BUDGET_SCOPE}), cycle ignoré (pas de message fantôme).")
+        _stop.set()
+        return
+
     personality = load_personality(bot)
     ident = load_identity_json(bot)
     core = load_core_knowledge()
@@ -537,8 +564,8 @@ def bot_loop(bot: str, others: list[str]):
         if _stop.wait(delay):
             break
         try:
-            if mem.token_total() >= MAX_TOKENS_BUDGET:
-                log(f"  ⛔ {bot} stop budget")
+            if budget_exhausted():
+                log(f"  ⛔ {bot} stop budget (scope={BUDGET_SCOPE})")
                 break
             cycle(bot, sn, c, model, others)
             global _sync_counter
@@ -568,7 +595,7 @@ def main():
     except Exception as e:
         print(f"  ⚠ sync init: {e}")
     print(f"World  : {mem.WORLD_DIR}")
-    print(f"Budget : {MAX_TOKENS_BUDGET} tokens")
+    print(f"Budget : {MAX_TOKENS_BUDGET} tokens (scope={BUDGET_SCOPE}, déjà utilisé dans ce scope: {budget_used()})")
     try:
         root = ghub.ensure_clone()
         print(f"Repo   : {root} → https://github.com/lion9el/socialnet-world")

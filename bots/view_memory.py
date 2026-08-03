@@ -21,6 +21,12 @@ def main():
     print("======== MONDE ========")
     for o in mem.list_world(30):
         print(f"#{o['id']} {o['name']} @ {o['location']} — {o['description'][:120]} (by {o['created_by']})")
+    print()
+    print("======== BUDGET TOKENS (cumul à vie, table jamais purgée) ========")
+    for row in mem.token_usage_summary():
+        print(f"- {row['bot']}: {row['total']} tokens sur {row['calls']} appels")
+    print(f"TOTAL: {mem.token_total()} tokens")
+    print("(le budget réel utilisé par runtime.py dépend de BOT_TOKEN_BUDGET_SCOPE — voir bots/.env.example)")
 
 if __name__ == "__main__":
     main()
