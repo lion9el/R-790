@@ -25,6 +25,11 @@ def main():
     rels = q("SELECT bot_a, bot_b, trust, summary FROM relationships ORDER BY trust DESC")
     rules = q("SELECT bot, rule, ts FROM learned_rules ORDER BY id DESC LIMIT 30")
     tokens = q("SELECT bot, SUM(total_tokens) as tokens FROM token_usage GROUP BY bot")
+    try:
+        blackboard = q("SELECT key, value, author, ts FROM blackboard ORDER BY ts DESC LIMIT 40")
+        sync_log = q("SELECT kind, detail, ts FROM sync_log ORDER BY id DESC LIMIT 20")
+    except Exception:
+        blackboard, sync_log = [], []
 
     def rows_html(items, cols):
         if not items:
@@ -49,6 +54,8 @@ def main():
 </style></head><body>
 <h1>SocialNet — dashboard bots</h1>
 <p class="meta">Généré {datetime.datetime.now().isoformat(timespec='seconds')} — auto-refresh 30s</p>
+<section><h2>Blackboard (sync)</h2>{rows_html(blackboard, ['ts','author','key','value'])}</section>
+<section><h2>Sync log</h2>{rows_html(sync_log, ['ts','kind','detail'])}</section>
 <section><h2>Tokens</h2>{rows_html(tokens, ['bot','tokens'])}</section>
 <section><h2>Monde</h2>{rows_html(world, ['id','name','location','created_by','description'])}</section>
 <section><h2>Relations</h2>{rows_html(rels, ['bot_a','bot_b','trust','summary'])}</section>

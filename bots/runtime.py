@@ -25,6 +25,7 @@ load_dotenv(BOTS_DIR.parent / ".env")
 
 import memory_store as mem
 import git_workspace as ghub
+import sync as agent_sync
 
 SOCIALNET_URL = os.getenv("SOCIALNET_URL", "http://127.0.0.1:8000").rstrip("/")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
@@ -43,6 +44,8 @@ BOT_CONFIG = {
 
 _stop = threading.Event()
 _print_lock = threading.Lock()
+_sync_lock = threading.Lock()
+_sync_counter = 0
 
 
 def log(msg: str):
@@ -275,6 +278,10 @@ def cycle(bot: str, sn: SN, c: OpenAI, model: str, others: list[str]):
     )
 
     mem_block = mem.memory_prompt_block(bot)
+    try:
+        bb_block = agent_sync.blackboard_prompt_block()
+    except Exception:
+        bb_block = "(blackboard indisponible)"
     world = mem.list_world(10)
     world_txt = "\n".join(f"- {o['name']} @ {o['location']}: {o['description'][:90]}" for o in world) or "(vide)"
     feed = sn.feed(5)
@@ -285,7 +292,7 @@ def cycle(bot: str, sn: SN, c: OpenAI, model: str, others: list[str]):
 
     # 1) réflexion
     thought = llm(c, model, system,
-        f"[Horloge] {now}\n[Mémoire]\n{mem_block}\n\n[Monde]\n{world_txt}\n\n[Feed]\n{feed_txt}\n\n[Notifs]\n{notif_txt}\n\n"
+        f"[Horloge] {now}\n[Mémoire]\n{mem_block}\n\n[Blackboard]\n{bb_block}\n\n[Monde]\n{world_txt}\n\n[Feed]\n{feed_txt}\n\n[Notifs]\n{notif_txt}\n\n"
         "Réflexion INTERNE (non publiée). En 4-6 phrases : ce que tu apprends, humeur, micro-objectif, importance 0-10.",
         bot)
     if thought:
@@ -465,6 +472,16 @@ def bot_loop(bot: str, others: list[str]):
                 log(f"  ⛔ {bot} stop budget")
                 break
             cycle(bot, sn, c, model, others)
+            global _sync_counter
+            with _sync_lock:
+                _sync_counter += 1
+                do_sync = (_sync_counter % 6 == 0)
+            if do_sync:
+                try:
+                    sr = agent_sync.full_sync()
+                    log(f"  🔄 sync collective: {sr.get('files_indexed')} fichiers, {sr.get('facts_broadcast')} faits")
+                except Exception as e:
+                    log(f"  ⚠ sync: {e}")
         except Exception:
             traceback.print_exc()
             time.sleep(8)
@@ -476,6 +493,11 @@ def main():
     seed_permanent_memory()
     print(f"DB     : {mem.DB_PATH}")
     print("  ✓ mémoire permanente + mission AGENT-ZERO")
+    try:
+        sr = agent_sync.full_sync()
+        print(f"  ✓ sync: files={sr.get(\"files_indexed\")} broadcast={sr.get(\"facts_broadcast\")}")
+    except Exception as e:
+        print(f"  ⚠ sync init: {e}")
     print(f"World  : {mem.WORLD_DIR}")
     print(f"Budget : {MAX_TOKENS_BUDGET} tokens")
     try:

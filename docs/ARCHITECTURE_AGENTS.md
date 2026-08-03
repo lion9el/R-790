@@ -110,3 +110,15 @@ Pas de bus de messages interne dédié : le réseau social + GitHub *sont* le mi
 - Bus pub/sub interne en plus de SocialNet  
 - 4e agent (ex. gardien sécurité)  
 - Sandbox d’exécution de code isolée  
+
+## Synchronisation
+
+Module `bots/sync.py` :
+
+1. **pull** du dépôt `socialnet-world`
+2. **index** des fichiers nouveaux/modifiés → faits + blackboard
+3. **broadcast** des faits importance ≥ 8 vers tous les bots
+4. **relations** légèrement symétrisées
+5. **blackboard** partagé injecté dans chaque réflexion
+
+Déclenchement : au démarrage de `runtime.py`, puis tous les ~6 cycles cumulés, et à chaque `write_repo`.
