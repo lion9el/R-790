@@ -33,7 +33,7 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 LIGHT_MODEL = os.getenv("ECHO_GROQ_MODEL", "llama-3.1-8b-instant")
 MIN_DELAY = float(os.getenv("BOT_MIN_DELAY", "30"))
 MAX_DELAY = float(os.getenv("BOT_MAX_DELAY", "90"))
-MAX_TOKENS_BUDGET = int(os.getenv("BOT_TOKEN_BUDGET", "200000"))  # stop soft, voir BOT_TOKEN_BUDGET_SCOPE
+MAX_TOKENS_BUDGET = int(os.getenv("BOT_TOKEN_BUDGET", "0"))  # 0 = illimité (pas de stop). Voir BOT_TOKEN_BUDGET_SCOPE.
 # "run"      : le budget repart à zéro à chaque lancement du script (défaut le plus intuitif)
 # "day"      : le budget est partagé sur toute la journée UTC, même en relançant le script
 # "lifetime" : cumulatif pour toujours (comportement historique — se remplit vite si tu relances souvent)
@@ -63,10 +63,14 @@ def budget_epoch() -> Optional[str]:
 
 
 def budget_used() -> int:
+    if MAX_TOKENS_BUDGET <= 0:
+        return 0  # illimité : on ne va même pas interroger la DB à chaque appel
     return mem.token_total(since=budget_epoch())
 
 
 def budget_exhausted() -> bool:
+    if MAX_TOKENS_BUDGET <= 0:
+        return False  # illimité, ne s'arrête jamais tout seul
     return budget_used() >= MAX_TOKENS_BUDGET
 
 
@@ -595,7 +599,10 @@ def main():
     except Exception as e:
         print(f"  ⚠ sync init: {e}")
     print(f"World  : {mem.WORLD_DIR}")
-    print(f"Budget : {MAX_TOKENS_BUDGET} tokens (scope={BUDGET_SCOPE}, déjà utilisé dans ce scope: {budget_used()})")
+    if MAX_TOKENS_BUDGET <= 0:
+        print("Budget : illimité (BOT_TOKEN_BUDGET=0, aucun arrêt automatique sur les tokens)")
+    else:
+        print(f"Budget : {MAX_TOKENS_BUDGET} tokens (scope={BUDGET_SCOPE}, déjà utilisé dans ce scope: {budget_used()})")
     try:
         root = ghub.ensure_clone()
         print(f"Repo   : {root} → https://github.com/lion9el/socialnet-world")
