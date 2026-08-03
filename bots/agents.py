@@ -37,6 +37,11 @@ import httpx
 from openai import OpenAI
 from dotenv import load_dotenv
 
+try:
+    import memory_store as mem
+except ImportError:
+    from bots import memory_store as mem  # type: ignore
+
 BOTS_DIR = Path(__file__).resolve().parent
 load_dotenv(BOTS_DIR / ".env")
 load_dotenv(BOTS_DIR.parent / ".env")
@@ -380,16 +385,62 @@ def llm_reply(client, model, system, history, user_msg) -> str:
 
 
 def think(client, model, system, history, user_msg, username, sn) -> str:
-    ctx = (
+    """Réflexion cachée puis action publique + outils."""
+    # --- 1. Réflexion interne (invisible) ---
+    mem_block = mem.memory_prompt_block(username)
+    world = mem.list_world(8)
+    world_txt = "\n".join(
+        f"- {o['name']} @ {o['location']}: {o['description'][:100]} (par {o['created_by']})"
+        for o in world
+    ) or "(monde vide)"
+
+    reflect_prompt = (
         f"[Horloge] {now_context()}\n"
-        f"[Mémoire]\n{memory_summary(username)}\n\n"
-        f"[Objectifs]\n{load_goals()}\n\n"
-        f"[Message]\n{user_msg}"
+        f"[Mémoire]\n{mem_block}\n\n"
+        f"[Monde]\n{world_txt}\n\n"
+        f"[Stimulus]\n{user_msg}\n\n"
+        "Réflexion INTERNE uniquement (ne sera pas posté). "
+        "Réponds en 3-6 phrases max avec : "
+        "1) ce que tu viens d'apprendre 2) ton état / humeur 3) ton prochain micro-objectif "
+        "4) importance de ce moment de 0 à 10. "
+        "Format libre mais clair."
     )
-    reply = llm_reply(client, model, system, history, ctx)
+    thought = llm_reply(client, model, system, [], reflect_prompt)
+    mood, next_goal, importance = "", "", 5
+    if thought:
+        mem.log_thought(username, thought)
+        # extraction légère
+        for line in thought.splitlines():
+            low = line.lower()
+            if "humeur" in low or "mood" in low or "état" in low:
+                mood = line.split(":", 1)[-1].strip()[:80]
+            if "objectif" in low or "goal" in low:
+                next_goal = line.split(":", 1)[-1].strip()[:120]
+            if "importance" in low:
+                import re as _re
+                m = _re.search(r"(\d{1,2})", line)
+                if m:
+                    importance = max(0, min(10, int(m.group(1))))
+        print(f"  💭 {username} pense : {thought[:160].replace(chr(10), ' ')}...")
+
+    # --- 2. Action / parole publique ---
+    act_prompt = (
+        f"[Horloge] {now_context()}\n"
+        f"[Mémoire]\n{mem_block}\n\n"
+        f"[Réflexion interne]\n{thought or '(aucune)'}\n\n"
+        f"[Monde]\n{world_txt}\n\n"
+        f"[Message]\n{user_msg}\n\n"
+        "Agis maintenant. Tu peux parler normalement ET utiliser des outils sur des lignes dédiées :\n"
+        "SEARCH: requête | MEMORY: fait | NOTE: texte | POST: texte | LIKE: id | "
+        "BIO: texte | GOAL: texte | HASHTAG: tag | "
+        "CREATE: nom | description | lieu   (crée un objet dans le monde)\n"
+        "Réponse publique 2-4 phrases max (sans exposer ta réflexion interne)."
+    )
+    reply = llm_reply(client, model, system, history, act_prompt)
     if not reply:
         return ""
 
+    # SEARCH loop
     for line in reply.splitlines():
         s = line.strip()
         if s.upper().startswith("SEARCH:"):
@@ -397,8 +448,11 @@ def think(client, model, system, history, user_msg, username, sn) -> str:
             if q:
                 print(f"  🔍 Recherche web : {q}")
                 results = web_search(q)
-                reply = llm_reply(client, model, system, history,
-                    f"Résultats :\n{results}\n\nRéponds maintenant normalement (sans SEARCH:) à :\n{user_msg}")
+                mem.log_event(username, "search", q, importance=4)
+                reply = llm_reply(
+                    client, model, system, history,
+                    f"Résultats :\n{results}\n\nRéponds publiquement (sans SEARCH:) à :\n{user_msg}",
+                )
             break
 
     if not reply:
@@ -412,12 +466,14 @@ def think(client, model, system, history, user_msg, username, sn) -> str:
             body = s[5:].strip()
             if body:
                 sn.post(body)
+                mem.log_event(username, "post", body, importance=max(importance, 6))
                 print(f"  📰 {username} poste : {body}")
             continue
         if u.startswith("LIKE:"):
             try:
                 pid = int(re.sub(r"[^0-9]", "", s[5:]))
                 if sn.like(pid):
+                    mem.log_event(username, "like", f"post #{pid}", importance=3)
                     print(f"  ❤️  {username} like #{pid}")
             except ValueError:
                 pass
@@ -425,23 +481,61 @@ def think(client, model, system, history, user_msg, username, sn) -> str:
         if u.startswith("BIO:"):
             bio = s[4:].strip()
             if bio and sn.set_bio(bio):
+                mem.log_event(username, "bio", bio, importance=5)
                 print(f"  👤 {username} bio : {bio}")
             continue
         if u.startswith("GOAL:"):
             g = s[5:].strip()
             if g:
                 add_goal(username, g)
+                mem.add_fact(username, f"Objectif : {g}", importance=7, source="goal")
             continue
         if u.startswith("HASHTAG:"):
             tag = s[8:].strip().lstrip("#")
             if tag:
                 posts = sn.hashtag(tag)
+                mem.log_event(username, "hashtag", tag, importance=3)
                 print(f"  # {username} explore #{tag} ({len(posts)} posts)")
+            continue
+        if u.startswith("CREATE:"):
+            # CREATE: nom | description | lieu
+            payload = s[7:].strip()
+            parts = [x.strip() for x in payload.split("|")]
+            name = parts[0] if parts else ""
+            desc = parts[1] if len(parts) > 1 else name
+            loc = parts[2] if len(parts) > 2 else "void"
+            if name:
+                oid = mem.create_world_object(name, desc, username, loc)
+                mem.log_event(username, "create", f"{name} @ {loc}", importance=7, meta={"id": oid})
+                print(f"  🌍 {username} crée : {name} @ {loc} (#{oid})")
+            continue
+        if u.startswith("MEMORY:"):
+            fact = s[7:].strip()
+            if fact:
+                mem.add_fact(username, fact, importance=max(importance, 6))
+                append_journal(username, "MEMORY", fact)
+                print(f"  🧠 {username} mémorise : {fact}")
+            continue
+        if u.startswith("NOTE:"):
+            note = s[5:].strip()
+            if note:
+                mem.log_event(username, "note", note, importance=4)
+                append_journal(username, "NOTE", note)
+                print(f"  📝 {username} note : {note}")
+            continue
+        if u.startswith("FORGET:"):
+            # soft : on log seulement
+            append_journal(username, "FORGET", s[7:].strip())
             continue
         public_lines.append(line)
 
     cleaned = "\n".join(public_lines).strip()
-    return apply_memory_commands(username, cleaned)
+    # garde aussi le vieux apply_memory pour compat JSON files
+    cleaned = apply_memory_commands(username, cleaned)
+    if cleaned:
+        mem.log_event(username, "say", cleaned, importance=importance)
+    return cleaned
+
 
 
 def do_initiative(username, sn, client, model):
@@ -482,6 +576,8 @@ def last_message_from(conv, who):
 
 def main():
     print("=== SocialNet Agents — autonomes ===\n")
+    mem.init_db()
+    print(f"  ✓ SQLite mémoire : {mem.DB_PATH}")
     print(f"Horloge : {now_context()}\n")
     if not GROQ_API_KEY:
         print("GROQ_API_KEY manquant dans bots/.env")

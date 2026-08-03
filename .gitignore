@@ -48,3 +48,4 @@ bots/memory/*.json
 bots/memory/journal.md
 # garder le dossier versionné via .gitkeep
 !bots/memory/.gitkeep
+bots/memory/memory.db*
