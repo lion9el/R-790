@@ -53,3 +53,4 @@ bots/world/*
 !bots/world/.gitkeep
 bots/memory/dashboard.html
 bots/memory/journal/
+bots/socialnet-world-clone/

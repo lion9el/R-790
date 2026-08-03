@@ -24,6 +24,7 @@ load_dotenv(BOTS_DIR / ".env")
 load_dotenv(BOTS_DIR.parent / ".env")
 
 import memory_store as mem
+import git_workspace as ghub
 
 SOCIALNET_URL = os.getenv("SOCIALNET_URL", "http://127.0.0.1:8000").rstrip("/")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
@@ -194,7 +195,7 @@ def web_search(query: str) -> str:
         return f"(search fail: {e})"
 
 
-ACTIONS = "speak | message | post | like | comment | search | remember | create | rule | wait | journal | explore"
+ACTIONS = "speak | message | post | like | comment | search | remember | create | rule | wait | journal | explore | write_repo | read_repo"
 
 
 def cycle(bot: str, sn: SN, c: OpenAI, model: str, others: list[str]):
@@ -404,6 +405,11 @@ def main():
     print(f"DB     : {mem.DB_PATH}")
     print(f"World  : {mem.WORLD_DIR}")
     print(f"Budget : {MAX_TOKENS_BUDGET} tokens")
+    try:
+        root = ghub.ensure_clone()
+        print(f"Repo   : {root} → https://github.com/lion9el/socialnet-world")
+    except Exception as e:
+        print(f"Repo   : indisponible ({e})")
     if not GROQ_API_KEY:
         sys.exit("GROQ_API_KEY manquant dans bots/.env")
 
