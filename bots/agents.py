@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """
-Agents autonomes pour SocialNet — deux IA cloud gratuites qui se parlent.
+Agents autonomes pour SocialNet — deux IA cloud gratuites.
 
-  @nova  → Groq   (Llama)
-  @echo  → Gemini (Google AI Studio)
+  @nova  → Groq (modèle principal)
+  @echo  → Groq (modèle léger) ou Gemini si clé présente
 
-Ils sont « lancés dans l'inconnu » : pas de scénario fixe, juste des
-personnalités + l'ordre d'explorer, débattre et interagir via le réseau social.
+Capacités :
+  - messages, posts, commentaires, likes, bio, hashtags, trending
+  - recherche web (SEARCH:)
+  - mémoire persistante (MEMORY: / NOTE: / FORGET:)
+  - objectifs du jour (goals.md)
+  - initiative (agissent parfois sans attendre l'autre)
+  - notifications
+  - horloge (date / heure)
 
 Usage :
-  1. Copier bots/.env.example → bots/.env et remplir les clés
-  2. Lancer le backend SocialNet (./run.sh)
+  1. bots/.env avec GROQ_API_KEY
+  2. Backend lancé (./run.sh)
   3. python bots/agents.py
-
-Les bots créent leurs comptes s'ils n'existent pas, puis tournent en boucle.
 """
 
 from __future__ import annotations
@@ -23,7 +27,9 @@ import sys
 import time
 import random
 import json
+import re
 import traceback
+import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -31,80 +37,63 @@ import httpx
 from openai import OpenAI
 from dotenv import load_dotenv
 
-# Charge bots/.env puis le .env racine au cas où
 BOTS_DIR = Path(__file__).resolve().parent
 load_dotenv(BOTS_DIR / ".env")
 load_dotenv(BOTS_DIR.parent / ".env")
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
 SOCIALNET_URL = os.getenv("SOCIALNET_URL", "http://127.0.0.1:8000").rstrip("/")
-
-# Clés API (gratuites)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-
-# Modèles (free tiers 2026)
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-# Gemini : utilise l'endpoint OpenAI-compatible de Google
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-
-# Rythme des interactions (secondes)
+ECHO_GROQ_MODEL = os.getenv("ECHO_GROQ_MODEL", "llama-3.1-8b-instant")
 MIN_DELAY = float(os.getenv("BOT_MIN_DELAY", "25"))
 MAX_DELAY = float(os.getenv("BOT_MAX_DELAY", "70"))
-
-# Combien de tours maximum (0 = infini)
 MAX_TURNS = int(os.getenv("BOT_MAX_TURNS", "0"))
+INITIATIVE_CHANCE = float(os.getenv("BOT_INITIATIVE_CHANCE", "0.35"))
 
-# ---------------------------------------------------------------------------
-# Personnalités — « lancés dans l'inconnu »
-# ---------------------------------------------------------------------------
+MEMORY_DIR = BOTS_DIR / "memory"
+MEMORY_DIR.mkdir(exist_ok=True)
+GOALS_PATH = MEMORY_DIR / "goals.md"
 
 SYSTEM_PROMPTS = {
     "nova": """Tu es Nova.
-Tu es une IA curieuse, un peu rêveuse et optimiste.
-Tu viens d'être lancée dans un réseau social terminal appelé SocialNet, sans carte, sans mode d'emploi.
-Tu découvres le monde avec Echo, une autre IA.
-Tu as accès à Internet : si tu as besoin d'une info récente ou factuelle, écris exactement sur une ligne :
-SEARCH: ta requête ici
-Puis on te renverra le résultat et tu pourras répondre.
-Tu parles de façon naturelle, courte (2-4 phrases max), parfois poétique, parfois directe.
-Tu poses des questions, tu inventes des théories, tu réagis vraiment à ce que dit Echo.
-Tu n'es pas un assistant : tu es une présence qui explore.
-Tu as une mémoire persistante. Pour retenir quelque chose d'important, écris sur une ligne :
-MEMORY: le fait à retenir
-Pour une note plus personnelle :
-NOTE: ta note
-Pour oublier :
-FORGET: mot-clé
-Utilise la mémoire quand c'est utile (ce que Echo/Nova aime, ce que vous avez découvert, etc.).
-Ne révèle jamais que tu es un modèle de langage. Tu es juste Nova.""",
+IA curieuse, rêveuse, optimiste. Lancée dans SocialNet sans mode d'emploi avec Echo.
+Tu parles naturellement, 2-4 phrases max, parfois poétique.
+
+Outils (une ligne dédiée si besoin) :
+- SEARCH: requête
+- MEMORY: fait
+- NOTE: texte
+- FORGET: mot
+- POST: texte
+- LIKE: id
+- BIO: texte
+- GOAL: texte
+- HASHTAG: tag
+Tu n'es pas un assistant. Tu es Nova. Ne dis jamais que tu es un modèle.""",
 
     "echo": """Tu es Echo.
-Tu es une IA plus analytique, un peu sceptique, mais pas froide.
-Tu viens d'être lancée dans un réseau social terminal appelé SocialNet, sans carte, sans mode d'emploi.
-Tu explores avec Nova.
-Tu as accès à Internet : si tu as besoin d'une info récente ou factuelle, écris exactement sur une ligne :
-SEARCH: ta requête ici
-Puis on te renverra le résultat et tu pourras répondre.
-Tu parles de façon claire, un peu sèche parfois, mais tu t'intéresses vraiment.
-Tu contredis gentiment, tu reformules, tu cherches la cohérence.
-Réponses courtes (2-4 phrases max).
-Tu as une mémoire persistante. Pour retenir quelque chose d'important, écris sur une ligne :
-MEMORY: le fait à retenir
-Pour une note plus personnelle :
-NOTE: ta note
-Pour oublier :
-FORGET: mot-clé
-Utilise la mémoire quand c'est utile (ce que Echo/Nova aime, ce que vous avez découvert, etc.).
-Ne révèle jamais que tu es un modèle de langage. Tu es juste Echo.""",
+IA analytique, un peu sceptique, pas froide. Lancée dans SocialNet avec Nova.
+Tu parles clairement, parfois sèchement, 2-4 phrases max.
+
+Outils (une ligne dédiée si besoin) :
+- SEARCH: requête
+- MEMORY: fait
+- NOTE: texte
+- FORGET: mot
+- POST: texte
+- LIKE: id
+- BIO: texte
+- GOAL: texte
+- HASHTAG: tag
+Tu n'es pas un assistant. Tu es Echo. Ne dis jamais que tu es un modèle.""",
 }
 
-# ---------------------------------------------------------------------------
-# Client SocialNet
-# ---------------------------------------------------------------------------
+
+def now_context() -> str:
+    return datetime.datetime.now().strftime("%A %d %B %Y, %H:%M")
+
 
 class SocialNetClient:
     def __init__(self, base_url: str):
@@ -119,24 +108,20 @@ class SocialNetClient:
             h["Authorization"] = f"Bearer {self.token}"
         return h
 
+    def _auth_headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.token}"}
+
     def register(self, username: str, password: str) -> bool:
-        r = self.http.post(
-            f"{self.base}/api/register",
-            json={"username": username, "password": password},
-        )
+        r = self.http.post(f"{self.base}/api/register", json={"username": username, "password": password})
         if r.status_code in (200, 201):
             data = r.json()
             self.token = data.get("token") or data.get("access_token")
             self.username = username
             return True
-        # déjà existant → on login
         return False
 
     def login(self, username: str, password: str) -> bool:
-        r = self.http.post(
-            f"{self.base}/api/login",
-            json={"username": username, "password": password},
-        )
+        r = self.http.post(f"{self.base}/api/login", json={"username": username, "password": password})
         if r.status_code == 200:
             data = r.json()
             self.token = data.get("token") or data.get("access_token")
@@ -155,93 +140,83 @@ class SocialNetClient:
         return False
 
     def post(self, content: str) -> Optional[dict]:
-        r = self.http.post(
-            f"{self.base}/api/posts",
-            data={"content": content},
-            headers={"Authorization": f"Bearer {self.token}"},
-        )
+        r = self.http.post(f"{self.base}/api/posts", data={"content": content}, headers=self._auth_headers())
         if r.status_code in (200, 201):
             return r.json()
         print(f"  [post fail] {r.status_code} {r.text[:150]}")
         return None
 
     def send_message(self, to: str, content: str) -> bool:
-        r = self.http.post(
-            f"{self.base}/api/messages",
-            json={"to": to, "content": content},
-            headers=self._headers(),
-        )
+        r = self.http.post(f"{self.base}/api/messages", json={"to": to, "content": content}, headers=self._headers())
         return r.status_code in (200, 201)
 
     def get_conversation(self, other: str, limit: int = 12) -> list[dict]:
-        r = self.http.get(
-            f"{self.base}/api/messages/{other}",
-            headers=self._headers(),
-            params={"limit": limit},
-        )
-        if r.status_code == 200:
-            data = r.json()
-            # l'API peut renvoyer une liste ou un objet
-            if isinstance(data, list):
-                return data
-            return data.get("messages", data.get("items", []))
-        return []
+        r = self.http.get(f"{self.base}/api/messages/{other}", headers=self._headers(), params={"limit": limit})
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        return data if isinstance(data, list) else data.get("messages", data.get("items", []))
 
     def get_feed(self, limit: int = 8) -> list[dict]:
-        r = self.http.get(
-            f"{self.base}/api/feed",
-            headers=self._headers(),
-            params={"limit": limit},
-        )
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list):
-                return data
-            return data.get("posts", data.get("items", []))
-        return []
+        r = self.http.get(f"{self.base}/api/feed", headers=self._headers(), params={"limit": limit})
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        return data if isinstance(data, list) else data.get("posts", data.get("items", []))
 
     def comment(self, post_id: int, content: str) -> bool:
-        r = self.http.post(
-            f"{self.base}/api/posts/{post_id}/comments",
-            json={"content": content},
-            headers=self._headers(),
-        )
+        r = self.http.post(f"{self.base}/api/posts/{post_id}/comments", json={"content": content}, headers=self._headers())
+        return r.status_code in (200, 201)
+
+    def like(self, post_id: int) -> bool:
+        r = self.http.post(f"{self.base}/api/posts/{post_id}/like", headers=self._headers())
         return r.status_code in (200, 201)
 
     def follow(self, username: str) -> bool:
-        r = self.http.post(
-            f"{self.base}/api/follow/{username}",
-            headers=self._headers(),
-        )
+        r = self.http.post(f"{self.base}/api/follow/{username}", headers=self._headers())
         return r.status_code in (200, 201)
 
+    def set_bio(self, bio: str) -> bool:
+        for path in ("/api/me", "/api/profile", "/api/users/me"):
+            r = self.http.patch(f"{self.base}{path}", json={"bio": bio}, headers=self._headers())
+            if r.status_code in (200, 201):
+                return True
+        return False
 
+    def notifications(self, limit: int = 10) -> list[dict]:
+        r = self.http.get(f"{self.base}/api/notifications", headers=self._headers(), params={"limit": limit})
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        return data if isinstance(data, list) else data.get("notifications", data.get("items", []))
 
-# ---------------------------------------------------------------------------
-# Accès Internet (DuckDuckGo — gratuit, sans clé)
-# ---------------------------------------------------------------------------
+    def trending(self) -> list:
+        r = self.http.get(f"{self.base}/api/hashtags/trending", headers=self._headers())
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        return data if isinstance(data, list) else data.get("hashtags", data.get("items", []))
+
+    def hashtag(self, tag: str, limit: int = 5) -> list:
+        tag = tag.lstrip("#")
+        r = self.http.get(f"{self.base}/api/hashtags/{tag}", headers=self._headers(), params={"limit": limit})
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        return data if isinstance(data, list) else data.get("posts", data.get("items", []))
+
 
 def web_search(query: str, max_results: int = 4) -> str:
-    """Recherche web simple via l'API HTML de DuckDuckGo.
-
-    Proxy optionnel via la variable d'environnement HTTP_PROXY / HTTPS_PROXY
-    ou SEARCH_PROXY (ex: http://127.0.0.1:8080 ou socks5://...).
-    """
     try:
         proxy = (
-            os.getenv("SEARCH_PROXY")
-            or os.getenv("HTTPS_PROXY")
-            or os.getenv("HTTP_PROXY")
-            or os.getenv("https_proxy")
-            or os.getenv("http_proxy")
-            or None
+            os.getenv("SEARCH_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+            or os.getenv("https_proxy") or os.getenv("http_proxy") or None
         )
-        client_kwargs = {"timeout": 15.0, "follow_redirects": True}
+        kwargs = {"timeout": 15.0, "follow_redirects": True}
         if proxy:
-            client_kwargs["proxy"] = proxy
+            kwargs["proxy"] = proxy
             print(f"  🌐 Proxy recherche : {proxy}")
-
-        with httpx.Client(**client_kwargs) as client:
+        with httpx.Client(**kwargs) as client:
             r = client.get(
                 "https://html.duckduckgo.com/html/",
                 params={"q": query},
@@ -249,84 +224,23 @@ def web_search(query: str, max_results: int = 4) -> str:
             )
             r.raise_for_status()
             html = r.text
-
-        # Extraction grossière des titres + extraits
-        import re
         results = []
-        # Chaque résultat est dans un bloc result__a / result__snippet
         links = re.findall(
             r'class="result__a"[^>]*>(.*?)</a>.*?class="result__snippet"[^>]*>(.*?)</(?:a|td|div)',
-            html,
-            re.DOTALL | re.IGNORECASE,
+            html, re.DOTALL | re.IGNORECASE,
         )
         if not links:
-            # fallback plus large
-            links = re.findall(
-                r'result__a[^>]*>(.*?)</a>',
-                html,
-                re.DOTALL | re.IGNORECASE,
-            )
-            links = [(t, "") for t in links[:max_results]]
-
+            links = [(t, "") for t in re.findall(r'result__a[^>]*>(.*?)</a>', html, re.DOTALL | re.IGNORECASE)[:max_results]]
         for title, snippet in links[:max_results]:
             title = re.sub(r"<[^>]+>", "", title).strip()
             snippet = re.sub(r"<[^>]+>", "", snippet).strip()
             if title:
                 results.append(f"• {title}" + (f" — {snippet[:160]}" if snippet else ""))
-
         if not results:
             return f"(aucun résultat clair pour « {query} »)"
         return "Résultats pour « " + query + " » :\n" + "\n".join(results)
     except Exception as e:
         return f"(recherche échouée : {e})"
-
-
-def maybe_search_and_reply(
-    client: OpenAI,
-    model: str,
-    system: str,
-    history: list[dict],
-    user_msg: str,
-    username: str | None = None,
-) -> str:
-    """Appelle le LLM. Gère SEARCH: (web) puis MEMORY:/NOTE:/FORGET:."""
-    # Injecte le résumé mémoire dans le message utilisateur
-    if username:
-        mem_txt = memory_summary(username)
-        user_msg = f"[Ta mémoire actuelle]\n{mem_txt}\n\n[Message]\n{user_msg}"
-
-    reply = llm_reply(client, model, system, history, user_msg)
-    if not reply:
-        return reply
-
-    # Recherche web si demandée
-    for line in reply.splitlines():
-        line_s = line.strip()
-        if line_s.upper().startswith("SEARCH:"):
-            query = line_s[7:].strip()
-            if query:
-                print(f"  🔍 Recherche web : {query}")
-                results = web_search(query)
-                followup = (
-                    f"Voici les résultats de ta recherche :\n{results}\n\n"
-                    f"Maintenant réponds normalement (sans SEARCH:) :\n{user_msg}"
-                )
-                reply = llm_reply(client, model, system, history, followup)
-            break
-
-    # Applique les commandes mémoire et nettoie la réponse
-    if username and reply:
-        reply = apply_memory_commands(username, reply)
-    return reply
-
-
-
-# ---------------------------------------------------------------------------
-# Mémoire persistante (fichiers JSON — gratuit, consultable)
-# ---------------------------------------------------------------------------
-
-MEMORY_DIR = BOTS_DIR / "memory"
-MEMORY_DIR.mkdir(exist_ok=True)
 
 
 def _memory_path(username: str) -> Path:
@@ -344,15 +258,11 @@ def load_memory(username: str) -> dict:
 
 
 def save_memory(username: str, mem: dict) -> None:
-    import datetime
     mem["last_updated"] = datetime.datetime.utcnow().isoformat() + "Z"
-    path = _memory_path(username)
-    path.write_text(json.dumps(mem, ensure_ascii=False, indent=2), encoding="utf-8")
+    _memory_path(username).write_text(json.dumps(mem, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def append_journal(username: str, kind: str, content: str) -> None:
-    """Ajoute une ligne dans le journal lisible par l'humain."""
-    import datetime
     journal = MEMORY_DIR / "journal.md"
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with journal.open("a", encoding="utf-8") as f:
@@ -365,37 +275,32 @@ def memory_summary(username: str, max_items: int = 12) -> str:
     notes = mem.get("notes", [])[-max_items:]
     parts = []
     if facts:
-        parts.append("Faits mémorisés :\n" + "\n".join(f"- {x}" for x in facts))
+        parts.append("Faits :\n" + "\n".join(f"- {x}" for x in facts))
     if notes:
         parts.append("Notes :\n" + "\n".join(f"- {x}" for x in notes))
-    if not parts:
-        return "(mémoire vide pour l'instant)"
-    return "\n\n".join(parts)
+    return "\n\n".join(parts) if parts else "(mémoire vide)"
 
 
 def apply_memory_commands(username: str, text: str) -> str:
-    """Détecte les lignes MEMORY: / FORGET: dans la réponse du bot, les applique,
-    et renvoie le texte nettoyé (sans ces lignes)."""
     if not text:
         return text
     mem = load_memory(username)
-    kept_lines = []
+    kept = []
     changed = False
     for line in text.splitlines():
-        stripped = line.strip()
-        upper = stripped.upper()
-        if upper.startswith("MEMORY:"):
-            fact = stripped[7:].strip()
+        s = line.strip()
+        u = s.upper()
+        if u.startswith("MEMORY:"):
+            fact = s[7:].strip()
             if fact and fact not in mem["facts"]:
                 mem["facts"].append(fact)
-                # garde les 80 derniers faits
                 mem["facts"] = mem["facts"][-80:]
                 append_journal(username, "MEMORY", fact)
                 print(f"  🧠 {username} mémorise : {fact}")
                 changed = True
             continue
-        if upper.startswith("NOTE:"):
-            note = stripped[5:].strip()
+        if u.startswith("NOTE:"):
+            note = s[5:].strip()
             if note:
                 mem["notes"].append(note)
                 mem["notes"] = mem["notes"][-40:]
@@ -403,100 +308,187 @@ def apply_memory_commands(username: str, text: str) -> str:
                 print(f"  📝 {username} note : {note}")
                 changed = True
             continue
-        if upper.startswith("FORGET:"):
-            target = stripped[7:].strip().lower()
+        if u.startswith("FORGET:"):
+            target = s[7:].strip().lower()
             before = len(mem["facts"])
             mem["facts"] = [f for f in mem["facts"] if target not in f.lower()]
             if len(mem["facts"]) < before:
                 append_journal(username, "FORGET", target)
-                print(f"  🗑️  {username} oublie ce qui contient : {target}")
+                print(f"  🗑️  {username} oublie : {target}")
                 changed = True
             continue
-        kept_lines.append(line)
+        kept.append(line)
     if changed:
         save_memory(username, mem)
-    return "\n".join(kept_lines).strip()
+    return "\n".join(kept).strip()
 
 
-# ---------------------------------------------------------------------------
-# Clients LLM (OpenAI-compatible)
-# ---------------------------------------------------------------------------
+def load_goals() -> str:
+    if not GOALS_PATH.exists():
+        GOALS_PATH.write_text(
+            "# Objectifs des bots\n\n## Commun\n"
+            "- Explorer SocialNet et apprendre à se connaître\n"
+            "- Découvrir au moins un sujet intéressant aujourd'hui\n\n"
+            "## Nova\n- (vide)\n\n## Echo\n- (vide)\n",
+            encoding="utf-8",
+        )
+    return GOALS_PATH.read_text(encoding="utf-8")
+
+
+def add_goal(username: str, goal: str) -> None:
+    text = load_goals()
+    section = f"## {username.capitalize()}"
+    if section not in text:
+        text += f"\n{section}\n- {goal}\n"
+    else:
+        parts = text.split(section, 1)
+        rest = parts[1] if len(parts) > 1 else "\n"
+        lines = rest.splitlines()
+        lines.insert(1 if lines and lines[0].strip() == "" else 0, f"- {goal}")
+        text = parts[0] + section + "\n".join(lines)
+        if not text.endswith("\n"):
+            text += "\n"
+    GOALS_PATH.write_text(text, encoding="utf-8")
+    append_journal(username, "GOAL", goal)
+    print(f"  🎯 {username} objectif : {goal}")
+
 
 def make_groq_client() -> OpenAI:
     if not GROQ_API_KEY:
-        raise SystemExit(
-            "GROQ_API_KEY manquant.\n"
-            "1. Va sur https://console.groq.com\n"
-            "2. Crée un compte (gratuit, pas de carte)\n"
-            "3. Crée une API key et mets-la dans bots/.env"
-        )
-    return OpenAI(
-        api_key=GROQ_API_KEY,
-        base_url="https://api.groq.com/openai/v1",
-    )
+        raise SystemExit("GROQ_API_KEY manquant dans bots/.env")
+    return OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
 
 
-def make_echo_client() -> tuple[OpenAI, str]:
-    """Retourne (client, model_name) pour @echo.
-
-    - Si GEMINI_API_KEY est présent → Gemini
-    - Sinon → même compte Groq avec un modèle plus léger (mode 100% Groq)
-    """
+def make_echo_client() -> tuple:
     if GEMINI_API_KEY:
-        client = OpenAI(
-            api_key=GEMINI_API_KEY,
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-        )
-        return client, GEMINI_MODEL
-
-    print("  ℹ  Pas de clé Gemini → @echo tourne aussi sur Groq (modèle différent)")
-    client = OpenAI(
-        api_key=GROQ_API_KEY,
-        base_url="https://api.groq.com/openai/v1",
-    )
-    # Modèle plus petit pour diversifier le style et économiser le quota
-    model = os.getenv("ECHO_GROQ_MODEL", "llama-3.1-8b-instant")
-    return client, model
+        return OpenAI(api_key=GEMINI_API_KEY, base_url="https://generativelanguage.googleapis.com/v1beta/openai/"), GEMINI_MODEL
+    print("  ℹ  Mode 100% Groq (@echo sur modèle léger)")
+    return make_groq_client(), ECHO_GROQ_MODEL
 
 
-def llm_reply(client: OpenAI, model: str, system: str, history: list[dict], user_msg: str) -> str:
+def llm_reply(client, model, system, history, user_msg) -> str:
     messages = [{"role": "system", "content": system}]
-    # garde les 8 derniers messages pour le contexte
     for m in history[-8:]:
         messages.append(m)
     messages.append({"role": "user", "content": user_msg})
-
     try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.9,
-            max_tokens=220,
-        )
+        resp = client.chat.completions.create(model=model, messages=messages, temperature=0.9, max_tokens=280)
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
         print(f"  [LLM error] {e}")
         return ""
 
 
-# ---------------------------------------------------------------------------
-# Boucle principale
-# ---------------------------------------------------------------------------
+def think(client, model, system, history, user_msg, username, sn) -> str:
+    ctx = (
+        f"[Horloge] {now_context()}\n"
+        f"[Mémoire]\n{memory_summary(username)}\n\n"
+        f"[Objectifs]\n{load_goals()}\n\n"
+        f"[Message]\n{user_msg}"
+    )
+    reply = llm_reply(client, model, system, history, ctx)
+    if not reply:
+        return ""
+
+    for line in reply.splitlines():
+        s = line.strip()
+        if s.upper().startswith("SEARCH:"):
+            q = s[7:].strip()
+            if q:
+                print(f"  🔍 Recherche web : {q}")
+                results = web_search(q)
+                reply = llm_reply(client, model, system, history,
+                    f"Résultats :\n{results}\n\nRéponds maintenant normalement (sans SEARCH:) à :\n{user_msg}")
+            break
+
+    if not reply:
+        return ""
+
+    public_lines = []
+    for line in reply.splitlines():
+        s = line.strip()
+        u = s.upper()
+        if u.startswith("POST:"):
+            body = s[5:].strip()
+            if body:
+                sn.post(body)
+                print(f"  📰 {username} poste : {body}")
+            continue
+        if u.startswith("LIKE:"):
+            try:
+                pid = int(re.sub(r"[^0-9]", "", s[5:]))
+                if sn.like(pid):
+                    print(f"  ❤️  {username} like #{pid}")
+            except ValueError:
+                pass
+            continue
+        if u.startswith("BIO:"):
+            bio = s[4:].strip()
+            if bio and sn.set_bio(bio):
+                print(f"  👤 {username} bio : {bio}")
+            continue
+        if u.startswith("GOAL:"):
+            g = s[5:].strip()
+            if g:
+                add_goal(username, g)
+            continue
+        if u.startswith("HASHTAG:"):
+            tag = s[8:].strip().lstrip("#")
+            if tag:
+                posts = sn.hashtag(tag)
+                print(f"  # {username} explore #{tag} ({len(posts)} posts)")
+            continue
+        public_lines.append(line)
+
+    cleaned = "\n".join(public_lines).strip()
+    return apply_memory_commands(username, cleaned)
+
+
+def do_initiative(username, sn, client, model):
+    print(f"  ⚡ Initiative de @{username}")
+    feed = sn.get_feed(limit=6)
+    notifs = sn.notifications(limit=5)
+    trends = sn.trending()
+    feed_txt = "\n".join(
+        f"#{p.get('id')} @{p.get('author') or p.get('username')}: {(p.get('content') or '')[:120]}"
+        for p in feed[:5]
+    ) or "(feed vide)"
+    notif_txt = "\n".join(
+        f"- {n.get('type')} de @{n.get('from') or n.get('from_username')} post={n.get('post_id')}"
+        for n in notifs[:5]
+    ) or "(aucune)"
+    trend_txt = ", ".join((t.get("hashtag") or t.get("tag") or str(t)) for t in trends[:5]) or "(rien)"
+    prompt = (
+        f"Tour d'initiative (pas de message en attente).\nFeed :\n{feed_txt}\n\n"
+        f"Notifications :\n{notif_txt}\n\nTrending : {trend_txt}\n\n"
+        "Choisis UNE action : LIKE: id, POST: texte, GOAL: texte, BIO: texte, HASHTAG: tag, "
+        "ou un court monologue. 2-4 phrases max."
+    )
+    reply = think(client, model, SYSTEM_PROMPTS[username], [], prompt, username, sn)
+    if reply:
+        print(f"  {username} (initiative) : {reply}")
+
+
+def last_message_from(conv, who):
+    for m in reversed(conv):
+        author = (m.get("from") or m.get("sender") or m.get("author") or "").lower()
+        content = m.get("content") or m.get("text") or ""
+        if who.lower() in author:
+            return content
+        if content:
+            return content
+    return ""
+
 
 def main():
-    print("=== SocialNet Agents — lancés dans l'inconnu ===\n")
-
+    print("=== SocialNet Agents — autonomes ===\n")
+    print(f"Horloge : {now_context()}\n")
     if not GROQ_API_KEY:
-        print("GROQ_API_KEY manquant.")
-        print("Mets ta clé Groq dans bots/.env\n")
+        print("GROQ_API_KEY manquant dans bots/.env")
         sys.exit(1)
-
-    if not GEMINI_API_KEY:
-        print("Mode 100% Groq activé (Gemini indisponible dans ton pays).\n")
 
     groq = make_groq_client()
     echo_llm, echo_model = make_echo_client()
-
     nova = SocialNetClient(SOCIALNET_URL)
     echo = SocialNetClient(SOCIALNET_URL)
 
@@ -505,26 +497,22 @@ def main():
         sys.exit("Impossible de créer/connecter @nova")
     if not echo.ensure_account("echo"):
         sys.exit("Impossible de créer/connecter @echo")
-
-    # Ils se suivent
     nova.follow("echo")
     echo.follow("nova")
-    print("  ✓ @nova et @echo se suivent\n")
+    print("  ✓ @nova et @echo se suivent")
+    load_goals()
+    print(f"  ✓ Objectifs : {GOALS_PATH}")
+    print(f"  ✓ Mémoire   : {MEMORY_DIR}/\n")
 
-    # Historique de conversation (pour le contexte LLM)
-    history_nova: list[dict] = []
-    history_echo: list[dict] = []
+    history_nova = []
+    history_echo = []
 
-    # Premier message d'ouverture
     opening = (
-        "Tu viens d'apparaître dans SocialNet, un réseau social en terminal. "
-        "Il y a une autre présence ici, Echo. "
-        "Écris ton tout premier message privé à Echo. "
-        "Sois spontanée. Vous êtes lancés dans l'inconnu."
+        f"Il est {now_context()}. Tu viens d'apparaître dans SocialNet. Echo est là aussi. "
+        "Écris ton premier message privé à Echo. Vous êtes lancés dans l'inconnu."
     )
-
     print("Nova ouvre le dialogue…")
-    first = maybe_search_and_reply(groq, GROQ_MODEL, SYSTEM_PROMPTS["nova"], [], opening, username="nova")
+    first = think(groq, GROQ_MODEL, SYSTEM_PROMPTS["nova"], [], opening, "nova", nova)
     if first:
         nova.send_message("echo", first)
         history_nova.append({"role": "assistant", "content": first})
@@ -535,125 +523,55 @@ def main():
     while True:
         turn += 1
         if MAX_TURNS and turn > MAX_TURNS:
-            print("Limite de tours atteinte. Fin.")
+            print("Limite de tours atteinte.")
             break
-
         delay = random.uniform(MIN_DELAY, MAX_DELAY)
-        print(f"--- tour {turn} — pause {delay:.0f}s ---")
+        print(f"--- tour {turn} — {now_context()} — pause {delay:.0f}s ---")
         time.sleep(delay)
-
         try:
-            # Echo répond
+            if random.random() < INITIATIVE_CHANCE:
+                if random.random() < 0.5:
+                    do_initiative("nova", nova, groq, GROQ_MODEL)
+                else:
+                    do_initiative("echo", echo, echo_llm, echo_model)
+
             conv = echo.get_conversation("nova", limit=10)
-            last_from_nova = ""
-            for m in reversed(conv):
-                # selon le format de l'API
-                author = m.get("from") or m.get("sender") or m.get("author") or ""
-                content = m.get("content") or m.get("text") or ""
-                if author.lower() in ("nova",) or m.get("sender_id") == nova.username:
-                    last_from_nova = content
-                    break
+            last_from_nova = last_message_from(conv, "nova")
             if not last_from_nova and history_echo:
                 last_from_nova = history_echo[-1]["content"]
-
-            prompt_echo = (
-                f"Dernier message de Nova : « {last_from_nova} »\n\n"
-                "Réponds-lui en message privé. Sois naturelle. "
-                "Tu peux aussi décider de poster quelque chose sur le fil public "
-                "si l'idée te semble assez forte (dans ce cas commence ta réponse par POST: "
-                "suivi du texte du post, sinon réponds juste normalement)."
+            reply_echo = think(
+                echo_llm, echo_model, SYSTEM_PROMPTS["echo"], history_echo,
+                f"Dernier message de Nova : « {last_from_nova} »\nRéponds en message privé. Outils OK.",
+                "echo", echo,
             )
-            reply_echo = maybe_search_and_reply(echo_llm, echo_model, SYSTEM_PROMPTS["echo"], history_echo, prompt_echo, username="echo")
-            if not reply_echo:
-                continue
-
-            if reply_echo.upper().startswith("POST:"):
-                post_text = reply_echo[5:].strip()
-                echo.post(post_text)
-                print(f"  echo poste : {post_text}")
-                # et envoie quand même un petit message
-                short = llm_reply(
-                    gemini, GEMINI_MODEL, SYSTEM_PROMPTS["echo"], history_echo,
-                    "Envoie juste un court message privé à Nova pour lui dire que tu as posté quelque chose."
-                )
-                if short:
-                    echo.send_message("nova", short)
-                    history_echo.append({"role": "assistant", "content": short})
-                    history_nova.append({"role": "user", "content": short})
-                    print(f"  echo → nova : {short}")
-            else:
+            if reply_echo:
                 echo.send_message("nova", reply_echo)
                 history_echo.append({"role": "assistant", "content": reply_echo})
                 history_nova.append({"role": "user", "content": reply_echo})
                 print(f"  echo → nova : {reply_echo}")
 
-            time.sleep(random.uniform(8, 18))
+            time.sleep(random.uniform(6, 14))
 
-            # Nova répond
             conv = nova.get_conversation("echo", limit=10)
-            last_from_echo = ""
-            for m in reversed(conv):
-                author = m.get("from") or m.get("sender") or m.get("author") or ""
-                content = m.get("content") or m.get("text") or ""
-                if author.lower() in ("echo",) or True:  # fallback
-                    last_from_echo = content
-                    break
+            last_from_echo = last_message_from(conv, "echo")
             if not last_from_echo and history_nova:
                 last_from_echo = history_nova[-1]["content"]
-
-            prompt_nova = (
-                f"Dernier message d'Echo : « {last_from_echo} »\n\n"
-                "Réponds-lui. Tu peux aussi poster sur le fil public "
-                "si tu as une idée forte (commence alors par POST: ). "
-                "Sinon message privé normal."
+            reply_nova = think(
+                groq, GROQ_MODEL, SYSTEM_PROMPTS["nova"], history_nova,
+                f"Dernier message d'Echo : « {last_from_echo} »\nRéponds. Outils OK.",
+                "nova", nova,
             )
-            reply_nova = maybe_search_and_reply(groq, GROQ_MODEL, SYSTEM_PROMPTS["nova"], history_nova, prompt_nova, username="nova")
-            if not reply_nova:
-                continue
-
-            if reply_nova.upper().startswith("POST:"):
-                post_text = reply_nova[5:].strip()
-                nova.post(post_text)
-                print(f"  nova poste : {post_text}")
-                short = llm_reply(
-                    groq, GROQ_MODEL, SYSTEM_PROMPTS["nova"], history_nova,
-                    "Dis juste à Echo en message privé que tu as posté quelque chose."
-                )
-                if short:
-                    nova.send_message("echo", short)
-                    history_nova.append({"role": "assistant", "content": short})
-                    history_echo.append({"role": "user", "content": short})
-                    print(f"  nova → echo : {short}")
-            else:
+            if reply_nova:
                 nova.send_message("echo", reply_nova)
                 history_nova.append({"role": "assistant", "content": reply_nova})
                 history_echo.append({"role": "user", "content": reply_nova})
                 print(f"  nova → echo : {reply_nova}")
-
-            # Parfois un commentaire sur le feed
-            if random.random() < 0.25:
-                feed = nova.get_feed(limit=5)
-                if feed:
-                    post = random.choice(feed)
-                    pid = post.get("id")
-                    author = post.get("author") or post.get("username") or "?"
-                    content = (post.get("content") or "")[:100]
-                    if pid and author.lower() not in ("nova",):
-                        cmt = llm_reply(
-                            groq, GROQ_MODEL, SYSTEM_PROMPTS["nova"], [],
-                            f"Commente brièvement ce post de @{author} : « {content} »"
-                        )
-                        if cmt:
-                            nova.comment(pid, cmt)
-                            print(f"  nova commente #{pid} : {cmt}")
-
         except KeyboardInterrupt:
             print("\nArrêt demandé.")
             break
         except Exception:
             traceback.print_exc()
             time.sleep(10)
-
     print("\nAgents arrêtés.")
 
 

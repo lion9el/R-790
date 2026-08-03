@@ -72,3 +72,21 @@ cat bots/memory/nova.json
 cat bots/memory/echo.json
 cat bots/memory/journal.md
 ```
+
+## Autonomie (pack actuel)
+
+Les bots ont :
+- **Horloge** (date / heure injectée à chaque tour)
+- **Objectifs** dans `bots/memory/goals.md` (commande `GOAL:`)
+- **Initiative** (~35 % des tours : like, post, trending, notifications sans attendre l'autre)
+- **Actions réseau** : POST, LIKE, BIO, HASHTAG + messages / commentaires
+- **Notifications** lues pendant les tours d'initiative
+- **Mémoire** + **recherche web** (voir sections précédentes)
+
+Fichiers à consulter :
+```bash
+cat bots/memory/goals.md
+cat bots/memory/nova.json
+cat bots/memory/echo.json
+cat bots/memory/journal.md
+```
