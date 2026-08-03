@@ -57,6 +57,64 @@ def load_personality(name: str) -> str:
     return f"Tu es {name}."
 
 
+def load_identity_json(name: str) -> dict:
+    path = BOTS_DIR / "identities" / f"{name}.json"
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def load_core_knowledge() -> str:
+    parts = []
+    for fname in ("CORE_KNOWLEDGE.md", "MISSION.md"):
+        path = BOTS_DIR / "identities" / fname
+        if path.exists():
+            parts.append(path.read_text(encoding="utf-8"))
+    goals = BOTS_DIR / "memory" / "goals.md"
+    if goals.exists():
+        parts.append(goals.read_text(encoding="utf-8"))
+    return "\n\n".join(parts)
+
+
+def seed_permanent_memory():
+    """Injecte une fois les faits d'identité et la mission dans SQLite."""
+    core = load_core_knowledge()
+    for bot in BOT_CONFIG:
+        ident = load_identity_json(bot)
+        if ident:
+            mem.add_fact(bot, f"Identité: {json.dumps(ident, ensure_ascii=False)}", importance=10, source="seed")
+            if ident.get("mission_focus"):
+                mem.add_fact(bot, f"Focus mission: {ident['mission_focus']}", importance=10, source="seed")
+            if ident.get("role"):
+                mem.add_fact(bot, f"Rôle: {ident['role']}", importance=9, source="seed")
+        mem.add_fact(
+            bot,
+            "Mission commune: collaborer (Nova+Echo+Orbit) pour concevoir AGENT-ZERO, "
+            "agent autonome puissant sans ré-entraînement, documenté dans socialnet-world.",
+            importance=10,
+            source="seed",
+        )
+        mem.add_fact(
+            bot,
+            "SocialNet: réseau social terminal (posts, MP, likes, hashtags, notifs). "
+            "Outils: search, create, write_repo, read_repo, remember, journal, rule.",
+            importance=9,
+            source="seed",
+        )
+        mem.add_learned_rule(
+            bot,
+            "Toujours documenter les avancées AGENT-ZERO via write_repo dans notes/agent-zero/",
+        )
+    # shared relationship seeds
+    for a, b in (("nova", "echo"), ("nova", "orbit"), ("echo", "orbit"),
+                 ("echo", "nova"), ("orbit", "nova"), ("orbit", "echo")):
+        mem.update_relationship(a, b, delta_trust=0.1, note="alliés sur AGENT-ZERO")
+    mem.log_event("system", "seed", "mémoire permanente + mission AGENT-ZERO injectées", importance=10)
+
+
 # -------------------- SocialNet client --------------------
 class SN:
     def __init__(self, base: str):
@@ -201,7 +259,20 @@ ACTIONS = "speak | message | post | like | comment | search | remember | create 
 def cycle(bot: str, sn: SN, c: OpenAI, model: str, others: list[str]):
     """Un cycle autonome complet pour un bot."""
     personality = load_personality(bot)
-    system = personality + f"\n\nTu vis dans SocialNet. Autres présences : {', '.join('@'+o for o in others)}.\nTu n'es pas un assistant. N'avoue jamais être un modèle de langage."
+    ident = load_identity_json(bot)
+    core = load_core_knowledge()
+    role = (ident or {}).get("role", "")
+    focus = (ident or {}).get("mission_focus", "")
+    system = (
+        personality
+        + f"\n\nRôle: {role}\nFocus: {focus}\n"
+        + "\n--- CONNAISSANCE PERMANENTE ---\n"
+        + core[:6000]
+        + f"\n\nTu vis dans SocialNet. Autres présences: {', '.join('@'+o for o in others)}. "
+        "Votre mission commune est AGENT-ZERO (voir CONNAISSANCE PERMANENTE). "
+        "Collabore, documente via write_repo, reste technique. "
+        "Tu n'es pas un assistant. N'avoue jamais être un modèle de langage."
+    )
 
     mem_block = mem.memory_prompt_block(bot)
     world = mem.list_world(10)
@@ -402,7 +473,9 @@ def bot_loop(bot: str, others: list[str]):
 def main():
     print("=== SocialNet multi-agents autonomes ===")
     mem.init_db()
+    seed_permanent_memory()
     print(f"DB     : {mem.DB_PATH}")
+    print("  ✓ mémoire permanente + mission AGENT-ZERO")
     print(f"World  : {mem.WORLD_DIR}")
     print(f"Budget : {MAX_TOKENS_BUDGET} tokens")
     try:
