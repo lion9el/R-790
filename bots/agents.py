@@ -73,6 +73,13 @@ Puis on te renverra le résultat et tu pourras répondre.
 Tu parles de façon naturelle, courte (2-4 phrases max), parfois poétique, parfois directe.
 Tu poses des questions, tu inventes des théories, tu réagis vraiment à ce que dit Echo.
 Tu n'es pas un assistant : tu es une présence qui explore.
+Tu as une mémoire persistante. Pour retenir quelque chose d'important, écris sur une ligne :
+MEMORY: le fait à retenir
+Pour une note plus personnelle :
+NOTE: ta note
+Pour oublier :
+FORGET: mot-clé
+Utilise la mémoire quand c'est utile (ce que Echo/Nova aime, ce que vous avez découvert, etc.).
 Ne révèle jamais que tu es un modèle de langage. Tu es juste Nova.""",
 
     "echo": """Tu es Echo.
@@ -85,6 +92,13 @@ Puis on te renverra le résultat et tu pourras répondre.
 Tu parles de façon claire, un peu sèche parfois, mais tu t'intéresses vraiment.
 Tu contredis gentiment, tu reformules, tu cherches la cohérence.
 Réponses courtes (2-4 phrases max).
+Tu as une mémoire persistante. Pour retenir quelque chose d'important, écris sur une ligne :
+MEMORY: le fait à retenir
+Pour une note plus personnelle :
+NOTE: ta note
+Pour oublier :
+FORGET: mot-clé
+Utilise la mémoire quand c'est utile (ce que Echo/Nova aime, ce que vous avez découvert, etc.).
 Ne révèle jamais que tu es un modèle de langage. Tu es juste Echo.""",
 }
 
@@ -267,28 +281,141 @@ def web_search(query: str, max_results: int = 4) -> str:
         return f"(recherche échouée : {e})"
 
 
-def maybe_search_and_reply(client: OpenAI, model: str, system: str, history: list[dict], user_msg: str) -> str:
-    """Appelle le LLM. S'il demande SEARCH:, on cherche puis on rappelle."""
+def maybe_search_and_reply(
+    client: OpenAI,
+    model: str,
+    system: str,
+    history: list[dict],
+    user_msg: str,
+    username: str | None = None,
+) -> str:
+    """Appelle le LLM. Gère SEARCH: (web) puis MEMORY:/NOTE:/FORGET:."""
+    # Injecte le résumé mémoire dans le message utilisateur
+    if username:
+        mem_txt = memory_summary(username)
+        user_msg = f"[Ta mémoire actuelle]\n{mem_txt}\n\n[Message]\n{user_msg}"
+
     reply = llm_reply(client, model, system, history, user_msg)
     if not reply:
         return reply
 
-    # Détecte une demande de recherche
+    # Recherche web si demandée
     for line in reply.splitlines():
-        line = line.strip()
-        if line.upper().startswith("SEARCH:"):
-            query = line[7:].strip()
+        line_s = line.strip()
+        if line_s.upper().startswith("SEARCH:"):
+            query = line_s[7:].strip()
             if query:
                 print(f"  🔍 Recherche web : {query}")
                 results = web_search(query)
-                # Second appel avec les résultats
                 followup = (
                     f"Voici les résultats de ta recherche :\n{results}\n\n"
-                    f"Maintenant réponds normalement à ce message (sans écrire SEARCH:) :\n{user_msg}"
+                    f"Maintenant réponds normalement (sans SEARCH:) :\n{user_msg}"
                 )
                 reply = llm_reply(client, model, system, history, followup)
             break
+
+    # Applique les commandes mémoire et nettoie la réponse
+    if username and reply:
+        reply = apply_memory_commands(username, reply)
     return reply
+
+
+
+# ---------------------------------------------------------------------------
+# Mémoire persistante (fichiers JSON — gratuit, consultable)
+# ---------------------------------------------------------------------------
+
+MEMORY_DIR = BOTS_DIR / "memory"
+MEMORY_DIR.mkdir(exist_ok=True)
+
+
+def _memory_path(username: str) -> Path:
+    return MEMORY_DIR / f"{username}.json"
+
+
+def load_memory(username: str) -> dict:
+    path = _memory_path(username)
+    if not path.exists():
+        return {"facts": [], "notes": [], "last_updated": None}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"facts": [], "notes": [], "last_updated": None}
+
+
+def save_memory(username: str, mem: dict) -> None:
+    import datetime
+    mem["last_updated"] = datetime.datetime.utcnow().isoformat() + "Z"
+    path = _memory_path(username)
+    path.write_text(json.dumps(mem, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def append_journal(username: str, kind: str, content: str) -> None:
+    """Ajoute une ligne dans le journal lisible par l'humain."""
+    import datetime
+    journal = MEMORY_DIR / "journal.md"
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with journal.open("a", encoding="utf-8") as f:
+        f.write(f"- **{ts}** `{username}` [{kind}] {content}\n")
+
+
+def memory_summary(username: str, max_items: int = 12) -> str:
+    mem = load_memory(username)
+    facts = mem.get("facts", [])[-max_items:]
+    notes = mem.get("notes", [])[-max_items:]
+    parts = []
+    if facts:
+        parts.append("Faits mémorisés :\n" + "\n".join(f"- {x}" for x in facts))
+    if notes:
+        parts.append("Notes :\n" + "\n".join(f"- {x}" for x in notes))
+    if not parts:
+        return "(mémoire vide pour l'instant)"
+    return "\n\n".join(parts)
+
+
+def apply_memory_commands(username: str, text: str) -> str:
+    """Détecte les lignes MEMORY: / FORGET: dans la réponse du bot, les applique,
+    et renvoie le texte nettoyé (sans ces lignes)."""
+    if not text:
+        return text
+    mem = load_memory(username)
+    kept_lines = []
+    changed = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        upper = stripped.upper()
+        if upper.startswith("MEMORY:"):
+            fact = stripped[7:].strip()
+            if fact and fact not in mem["facts"]:
+                mem["facts"].append(fact)
+                # garde les 80 derniers faits
+                mem["facts"] = mem["facts"][-80:]
+                append_journal(username, "MEMORY", fact)
+                print(f"  🧠 {username} mémorise : {fact}")
+                changed = True
+            continue
+        if upper.startswith("NOTE:"):
+            note = stripped[5:].strip()
+            if note:
+                mem["notes"].append(note)
+                mem["notes"] = mem["notes"][-40:]
+                append_journal(username, "NOTE", note)
+                print(f"  📝 {username} note : {note}")
+                changed = True
+            continue
+        if upper.startswith("FORGET:"):
+            target = stripped[7:].strip().lower()
+            before = len(mem["facts"])
+            mem["facts"] = [f for f in mem["facts"] if target not in f.lower()]
+            if len(mem["facts"]) < before:
+                append_journal(username, "FORGET", target)
+                print(f"  🗑️  {username} oublie ce qui contient : {target}")
+                changed = True
+            continue
+        kept_lines.append(line)
+    if changed:
+        save_memory(username, mem)
+    return "\n".join(kept_lines).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +524,7 @@ def main():
     )
 
     print("Nova ouvre le dialogue…")
-    first = maybe_search_and_reply(groq, GROQ_MODEL, SYSTEM_PROMPTS["nova"], [], opening)
+    first = maybe_search_and_reply(groq, GROQ_MODEL, SYSTEM_PROMPTS["nova"], [], opening, username="nova")
     if first:
         nova.send_message("echo", first)
         history_nova.append({"role": "assistant", "content": first})
@@ -436,7 +563,7 @@ def main():
                 "si l'idée te semble assez forte (dans ce cas commence ta réponse par POST: "
                 "suivi du texte du post, sinon réponds juste normalement)."
             )
-            reply_echo = maybe_search_and_reply(echo_llm, echo_model, SYSTEM_PROMPTS["echo"], history_echo, prompt_echo)
+            reply_echo = maybe_search_and_reply(echo_llm, echo_model, SYSTEM_PROMPTS["echo"], history_echo, prompt_echo, username="echo")
             if not reply_echo:
                 continue
 
@@ -480,7 +607,7 @@ def main():
                 "si tu as une idée forte (commence alors par POST: ). "
                 "Sinon message privé normal."
             )
-            reply_nova = maybe_search_and_reply(groq, GROQ_MODEL, SYSTEM_PROMPTS["nova"], history_nova, prompt_nova)
+            reply_nova = maybe_search_and_reply(groq, GROQ_MODEL, SYSTEM_PROMPTS["nova"], history_nova, prompt_nova, username="nova")
             if not reply_nova:
                 continue
 

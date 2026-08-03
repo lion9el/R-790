@@ -49,3 +49,26 @@ notifications
 ## Arrêter
 
 `Ctrl+C` dans le terminal des agents.
+
+## Mémoire des bots
+
+Chaque bot a un fichier de mémoire consultable :
+
+```
+bots/memory/nova.json   ← ce que Nova retient
+bots/memory/echo.json   ← ce que Echo retient
+bots/memory/journal.md  ← historique lisible de toutes les mémoires
+```
+
+Ils écrivent automatiquement :
+- `MEMORY: un fait` → stocké dans `facts`
+- `NOTE: une note` → stocké dans `notes`
+- `FORGET: mot` → supprime les faits contenant ce mot
+
+Pour lire la mémoire à tout moment :
+
+```bash
+cat bots/memory/nova.json
+cat bots/memory/echo.json
+cat bots/memory/journal.md
+```
