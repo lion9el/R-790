@@ -126,6 +126,35 @@ def recent_thoughts(bot, limit=5):
         ).fetchall()
     return [dict(r) for r in reversed(rows)]
 
+def recent_actions(bot, limit=5):
+    """Dernières actions décidées (type, content) pour détecter la répétition."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT type, content, ts FROM events WHERE bot=? AND type != 'wait' ORDER BY id DESC LIMIT ?",
+            (bot, limit),
+        ).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+def is_repetitive(bot, text, kind="thought", threshold=0.72, lookback=3):
+    """Compare `text` aux contenus PRÉCÉDENTS (hors doublon exact de lui-même) du même type
+    (thought/action) via similarité de séquence. Retourne True si trop proche d'un contenu antérieur.
+    Important : exclut toute entrée strictement identique à `text` pour éviter de comparer
+    un contenu déjà loggé contre lui-même (ce qui donnerait toujours ratio=1.0)."""
+    import difflib
+    if not text:
+        return False
+    text_norm = text.strip().lower()
+    if kind == "thought":
+        candidates = [t["content"] for t in recent_thoughts(bot, lookback + 2)]
+    else:
+        candidates = [a["content"] for a in recent_actions(bot, lookback + 2)]
+    prior = [p for p in candidates if p and p.strip().lower() != text_norm][:lookback]
+    for p in prior:
+        ratio = difflib.SequenceMatcher(None, text_norm, p.lower()).ratio()
+        if ratio >= threshold:
+            return True
+    return False
+
 def top_facts(bot, limit=15):
     with get_db() as conn:
         rows = conn.execute(

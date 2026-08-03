@@ -204,7 +204,7 @@ def client():
     return OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
 
 
-def llm(c, model, system, user, bot_name="?") -> str:
+def llm(c, model, system, user, bot_name="?", _retry=0) -> str:
     if mem.token_total() >= MAX_TOKENS_BUDGET:
         log(f"  ⛔ Budget tokens atteint ({MAX_TOKENS_BUDGET}). Stop soft.")
         _stop.set()
@@ -221,6 +221,17 @@ def llm(c, model, system, user, bot_name="?") -> str:
             mem.log_tokens(bot_name, model, getattr(usage, "prompt_tokens", 0), getattr(usage, "completion_tokens", 0))
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
+        msg = str(e)
+        is_rate_limit = "429" in msg or "rate_limit" in msg.lower()
+        if is_rate_limit and _retry < 4:
+            # Essaie d'extraire le délai suggéré par l'API ("try again in 29.88s")
+            wait_s = 5.0 * (2 ** _retry)
+            m = re.search(r"try again in ([\d.]+)s", msg)
+            if m:
+                wait_s = float(m.group(1)) + 1.0
+            log(f"  ⏳ {bot_name} rate-limit, retry #{_retry+1} dans {wait_s:.0f}s")
+            time.sleep(wait_s)
+            return llm(c, model, system, user, bot_name, _retry=_retry + 1)
         log(f"  [LLM error {bot_name}] {e}")
         time.sleep(3)
         return ""
@@ -290,22 +301,44 @@ def cycle(bot: str, sn: SN, c: OpenAI, model: str, others: list[str]):
     notif_txt = "\n".join(f"- {n.get('type')} from {n.get('from') or n.get('from_username')}" for n in notifs) or "(aucune)"
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # 1) réflexion
+    # 1) réflexion (avec garde anti-boucle : si la dernière pensée était déjà répétitive,
+    # on le dit explicitement au modèle pour qu'il change réellement de sujet/comportement)
+    last_thoughts = mem.recent_thoughts(bot, 2)
+    loop_warning = ""
+    if last_thoughts and mem.is_repetitive(bot, last_thoughts[-1]["content"], kind="thought", lookback=3):
+        loop_warning = (
+            "\n[ALERTE BOUCLE] Tes dernières réflexions se ressemblent trop, tu tournes en rond. "
+            "Interdiction de répéter la même idée. Change explicitement de sujet, de personne à qui parler, "
+            "ou d'action. Décris un fait NOUVEAU et concret, pas une méta-réflexion sur le fait que tu répètes."
+        )
+
     thought = llm(c, model, system,
         f"[Horloge] {now}\n[Mémoire]\n{mem_block}\n\n[Blackboard]\n{bb_block}\n\n[Monde]\n{world_txt}\n\n[Feed]\n{feed_txt}\n\n[Notifs]\n{notif_txt}\n\n"
-        "Réflexion INTERNE (non publiée). En 4-6 phrases : ce que tu apprends, humeur, micro-objectif, importance 0-10.",
+        "Réflexion INTERNE (non publiée). En 4-6 phrases : ce que tu apprends, humeur, micro-objectif, importance 0-10."
+        + loop_warning,
         bot)
     if thought:
         mem.log_thought(bot, thought)
         log(f"  💭 {bot}: {thought[:140].replace(chr(10),' ')}...")
 
     # 2) choix d'action structuré (texte contraint)
+    recent_act = mem.recent_actions(bot, 3)
+    action_loop_warning = ""
+    if recent_act and mem.is_repetitive(bot, recent_act[-1]["content"], kind="action", lookback=3):
+        forbidden = recent_act[-1]["type"]
+        action_loop_warning = (
+            f"\n[ALERTE BOUCLE] Ton action/contenu précédent ({forbidden}) était quasi identique aux précédents. "
+            f"Choisis une action DIFFÉRENTE de '{forbidden}' cette fois, avec un contenu concret et nouveau "
+            "(pas une reformulation)."
+        )
+
     decision = llm(c, model, system,
         f"[Réflexion]\n{thought}\n\n[Mémoire]\n{mem_block}\n\n"
         f"Choisis UNE action principale parmi : {ACTIONS}\n"
         "Réponds STRICTEMENT au format JSON d'une seule ligne :\n"
         '{"action":"...", "target":"...", "content":"...", "importance":5}\n'
-        "target = user ou post id selon l'action. content = texte. Pas d'autre texte.",
+        "target = user ou post id selon l'action. content = texte. Pas d'autre texte."
+        + action_loop_warning,
         bot)
 
     action, target, content, importance = "speak", "", "", 5
@@ -321,6 +354,14 @@ def cycle(bot: str, sn: SN, c: OpenAI, model: str, others: list[str]):
     except Exception:
         content = (decision or "").strip()
         action = "speak"
+
+    # Filet de sécurité : si malgré l'avertissement le contenu reste quasi identique
+    # aux dernières actions, on force un changement plutôt que de laisser la boucle continuer.
+    if content and mem.is_repetitive(bot, content, kind="action", lookback=3):
+        forced_pool = [a for a in ("explore", "create", "journal", "read_repo") if a != action]
+        action = random.choice(forced_pool) if forced_pool else "wait"
+        content = ""  # laisse la branche d'action générer son propre contenu par défaut
+        log(f"  🔁 {bot} boucle détectée après coup → action forcée: {action}")
 
     log(f"  ⚙️  {bot} → {action} target={target!r}")
 
@@ -415,6 +456,34 @@ def cycle(bot: str, sn: SN, c: OpenAI, model: str, others: list[str]):
             path = mem.write_daily_journal(bot, summary)
             mem.log_event(bot, "journal", summary[:200], importance=5)
             log(f"  📔 {bot} journal → {path}")
+        return
+
+    if action == "write_repo":
+        relpath = (target or "notes/agent-zero/notes.md").strip()
+        text = content or thought[:500] or "(vide)"
+        try:
+            rel = ghub.write_file(relpath, text, bot)
+            push_result = ghub.commit_and_push(f"{bot}: update {rel}", bot)
+            mem.log_event(bot, "write_repo", f"{rel} :: {push_result}", importance=max(importance, 6))
+            log(f"  📝 {bot} write_repo {rel} → {push_result}")
+        except Exception as e:
+            mem.log_event(bot, "write_repo_error", f"{relpath}: {e}", importance=4)
+            log(f"  ⚠ {bot} write_repo échoué ({relpath}): {e}")
+        return
+
+    if action == "read_repo":
+        try:
+            if target:
+                text = ghub.read_file(target)
+                mem.add_fact(bot, f"Lu dans {target}: {text[:300]}", importance=6, source="read_repo")
+                log(f"  📖 {bot} read_repo {target}")
+            else:
+                files = ghub.list_files()
+                mem.log_event(bot, "read_repo", "listing: " + ", ".join(files[:20]), importance=4)
+                log(f"  📖 {bot} liste repo ({len(files)} fichiers)")
+        except Exception as e:
+            mem.log_event(bot, "read_repo_error", str(e), importance=4)
+            log(f"  ⚠ {bot} read_repo échoué: {e}")
         return
 
     if action == "explore":
