@@ -1,0 +1,29 @@
+# Vérifie que le code des bots reste valide à chaque push
+
+name: Bots check
+
+on:
+  push:
+    paths:
+      - "bots/**"
+      - ".github/workflows/bots-check.yml"
+  pull_request:
+    paths:
+      - "bots/**"
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps bots
+        run: pip install -r bots/requirements-bots.txt
+      - name: Syntaxe Python
+        run: |
+          python -m py_compile bots/runtime.py bots/memory_store.py bots/git_workspace.py bots/dashboard.py bots/view_memory.py
+          python -c "import ast; ast.parse(open('bots/agents.py').read())"
+      - name: Init mémoire SQLite
+        run: python -c "import sys; sys.path.insert(0,'bots'); import memory_store as m; m.init_db(); print(m.DB_PATH)"
