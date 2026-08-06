@@ -5,6 +5,20 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
+## [Non publié] — Phase 3 : Postgres live (DATABASE_URL)
+
+### Ajouté
+- `database.py` dual-engine : SQLite (défaut) / PostgreSQL (`DATABASE_URL`)
+- Adaptation SQL : `?`→`%s`, `INSERT OR IGNORE`→`ON CONFLICT DO NOTHING`, `RETURNING id`
+- `schema.postgres.sql`
+- `docker compose --profile postgres` : service `socialnet-pg` branché sur `db`
+- `psycopg[binary]` dans requirements
+- Backup : `pg_dump` si engine=postgres
+- Comparaisons username portables via `LOWER()`
+
+### Vérifié
+- Suite tests auth / posts / account sur SQLite (49 tests échantillon)
+
 ## [Non publié] — Phase 2 : backups, dashboard ops, Postgres optionnel
 
 ### Ajouté

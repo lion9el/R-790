@@ -105,3 +105,25 @@ docker compose --profile postgres up -d db
 L'application utilise encore **SQLite** par défaut. Le service Postgres
 est provisionné pour une migration future (`DATABASE_URL`). Ne pas pointer
 l'app dessus sans migration de schéma.
+
+
+## Postgres live (Phase 3)
+
+```bash
+docker compose --profile postgres up --build
+```
+
+- Service `db` : Postgres 16
+- Service `socialnet-pg` : API avec
+  `DATABASE_URL=postgresql://socialnet:…@db:5432/socialnet`
+- Schéma : `backend/schema.postgres.sql`
+- Dépendance : `psycopg[binary]` (dans requirements.txt)
+
+Sans profile, l'app reste en **SQLite** (idéal pour dev / tests).
+
+Variable manuelle :
+
+```bash
+export DATABASE_URL=postgresql://user:pass@localhost:5432/socialnet
+cd backend && uvicorn app:app --reload
+```

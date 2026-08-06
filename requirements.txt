@@ -9,3 +9,4 @@ pyjwt==2.13.0
 python-multipart==0.0.32
 python-dotenv==1.2.2
 pillow==12.1.1
+psycopg[binary]==3.2.9

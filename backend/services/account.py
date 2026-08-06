@@ -39,7 +39,7 @@ def request_password_reset(username: str) -> str | None:
     publique, sauf en mode debug. Ici on renvoie le token pour le terminal demo.
     """
     with get_conn() as conn:
-        row = conn.execute("SELECT id FROM users WHERE username = ? COLLATE NOCASE", (username,)).fetchone()
+        row = conn.execute("SELECT id FROM users WHERE LOWER(username) = LOWER(?)", (username,)).fetchone()
         if not row:
             return None
         token = secrets.token_urlsafe(32)

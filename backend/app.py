@@ -857,7 +857,7 @@ def get_user_profile(username: str, user=Depends(get_current_user)):
     """Profil public enrichi. Respecte blocages et comptes privés."""
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT id, username, display_name, bio, avatar_path, is_private, created_at FROM users WHERE username = ? COLLATE NOCASE",
+            "SELECT id, username, display_name, bio, avatar_path, is_private, created_at FROM users WHERE LOWER(username) = LOWER(?)",
             (username,),
         ).fetchone()
         if not row:

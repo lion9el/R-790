@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from database import get_conn, DB_PATH
+from database import get_conn, DB_PATH, ENGINE, DATABASE_URL
 from services import backup as backup_service
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -65,8 +65,8 @@ def status() -> dict:
         "ok": db_error is None,
         "time": datetime.now(timezone.utc).isoformat(),
         "database": {
-            "engine": "sqlite",
-            "path": str(DB_PATH),
+            "engine": ENGINE,
+            "path": str(DB_PATH) if ENGINE == "sqlite" else (DATABASE_URL.split("@")[-1] if DATABASE_URL else ""),
             "exists": Path(DB_PATH).exists(),
             "error": db_error,
             "users": users,

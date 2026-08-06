@@ -20,7 +20,7 @@ def is_blocked(conn, user_a: int, user_b: int) -> bool:
 
 def block_user(blocker_id: int, username: str) -> None:
     with get_conn() as conn:
-        target = conn.execute("SELECT id FROM users WHERE username = ? COLLATE NOCASE", (username,)).fetchone()
+        target = conn.execute("SELECT id FROM users WHERE LOWER(username) = LOWER(?)", (username,)).fetchone()
         if not target:
             raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
         if target["id"] == blocker_id:
@@ -43,7 +43,7 @@ def block_user(blocker_id: int, username: str) -> None:
 
 def unblock_user(blocker_id: int, username: str) -> None:
     with get_conn() as conn:
-        target = conn.execute("SELECT id FROM users WHERE username = ? COLLATE NOCASE", (username,)).fetchone()
+        target = conn.execute("SELECT id FROM users WHERE LOWER(username) = LOWER(?)", (username,)).fetchone()
         if not target:
             raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
         conn.execute(
@@ -119,7 +119,7 @@ def request_follow(requester_id: int, target_username: str) -> dict[str, Any]:
     """Follow classique ou demande si compte privé."""
     with get_conn() as conn:
         target = conn.execute(
-            "SELECT id, username, is_private FROM users WHERE username = ? COLLATE NOCASE",
+            "SELECT id, username, is_private FROM users WHERE LOWER(username) = LOWER(?)",
             (target_username,),
         ).fetchone()
         if not target:
@@ -160,7 +160,7 @@ def request_follow(requester_id: int, target_username: str) -> dict[str, Any]:
 def respond_follow_request(target_id: int, requester_username: str, accept: bool) -> None:
     with get_conn() as conn:
         requester = conn.execute(
-            "SELECT id FROM users WHERE username = ? COLLATE NOCASE", (requester_username,)
+            "SELECT id FROM users WHERE LOWER(username) = LOWER(?)", (requester_username,)
         ).fetchone()
         if not requester:
             raise HTTPException(status_code=404, detail="Utilisateur introuvable.")

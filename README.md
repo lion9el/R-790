@@ -138,8 +138,9 @@ Après démarrage : **http://127.0.0.1:8000/ops**
 
 ```bash
 docker compose up --build
-# Postgres optionnel (infra prête) :
-# docker compose --profile postgres up --build
+# Postgres live (API branchée sur PG) :
+docker compose --profile postgres up --build
+# → service socialnet-pg + db, DATABASE_URL auto
 # ou
 docker build -t socialnet .
 docker run -e SOCIALNET_SECRET='...' -p 8000:8000 socialnet

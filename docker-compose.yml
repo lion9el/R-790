@@ -1,12 +1,11 @@
-# SocialNet — local / production
+# SocialNet
 #
-# Défaut (SQLite persisté) :
+# SQLite (défaut) :
 #   docker compose up --build
 #
-# Avec Postgres (profil) — réservé phase 2+ / prod :
+# Postgres live :
 #   docker compose --profile postgres up --build
-#   (l'app utilise encore SQLite par défaut ; Postgres est prêt pour
-#    migration future via DATABASE_URL — voir docs/DEPLOY.md)
+#   → socialnet reçoit DATABASE_URL=postgresql://...
 
 services:
   socialnet:
@@ -18,7 +17,7 @@ services:
       - SOCIALNET_BACKUP_DIR=/app/backups
       - SOCIALNET_BACKUP_INTERVAL=${SOCIALNET_BACKUP_INTERVAL:-3600}
       - SOCIALNET_BACKUP_KEEP=${SOCIALNET_BACKUP_KEEP:-14}
-      # Futur : DATABASE_URL=postgresql://socialnet:socialnet@db:5432/socialnet
+      - DATABASE_URL=${DATABASE_URL:-}
     volumes:
       - socialnet-data:/app/backend
       - socialnet-backups:/app/backups
@@ -28,9 +27,26 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 20s
 
-  # Postgres optionnel (profile) — infrastructure « grande entreprise »
+  # Stack Postgres : app + db liés
+  socialnet-pg:
+    build: .
+    profiles: ["postgres"]
+    ports:
+      - "8000:8000"
+    environment:
+      - SOCIALNET_SECRET=${SOCIALNET_SECRET:-change-moi-avant-la-production}
+      - SOCIALNET_BACKUP_DIR=/app/backups
+      - DATABASE_URL=postgresql://socialnet:${POSTGRES_PASSWORD:-socialnet}@db:5432/socialnet
+    volumes:
+      - socialnet-backups:/app/backups
+      - socialnet-uploads-pg:/app/backend/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
   db:
     image: postgres:16-alpine
     profiles: ["postgres"]
@@ -45,11 +61,12 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U socialnet"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
 volumes:
   socialnet-data:
   socialnet-backups:
   socialnet-pg:
+  socialnet-uploads-pg:

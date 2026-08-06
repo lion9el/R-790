@@ -8,6 +8,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+import subprocess
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 ROOT = BACKEND_DIR.parent
@@ -33,11 +34,25 @@ def run_backup() -> dict:
 
     result = {"id": name, "path": str(dest), "db": False, "uploads": False}
 
-    if DB_PATH.exists():
-        # Copie cohérente : sous SQLite, shutil.copy2 suffit en dev ;
-        # en charge, préférer `sqlite3 .backup` via CLI si dispo.
+    try:
+        from database import ENGINE, DATABASE_URL
+    except Exception:
+        ENGINE, DATABASE_URL = "sqlite", ""
+
+    if ENGINE == "postgres" and DATABASE_URL:
+        dump = dest / "socialnet.sql"
+        try:
+            subprocess.run(
+                ["pg_dump", DATABASE_URL, "-f", str(dump)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            result["db"] = True
+        except Exception as e:
+            (dest / "db_error.txt").write_text(str(e), encoding="utf-8")
+    elif DB_PATH.exists():
         shutil.copy2(DB_PATH, dest / "socialnet.db")
-        # WAL companions
         for suffix in ("-wal", "-shm"):
             side = Path(str(DB_PATH) + suffix)
             if side.exists():

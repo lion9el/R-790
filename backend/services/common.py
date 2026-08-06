@@ -83,7 +83,7 @@ def create_mention_notifications(
     to_push: list[tuple[int, dict]] = []
     for uname in usernames:
         target = conn.execute(
-            "SELECT id, username FROM users WHERE username = ? COLLATE NOCASE", (uname,)
+            "SELECT id, username FROM users WHERE LOWER(username) = LOWER(?)", (uname,)
         ).fetchone()
         if not target or target["id"] == actor_id:
             continue
