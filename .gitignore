@@ -58,3 +58,4 @@ bots/socialnet-world-clone/
 # Snapshots locaux
 backups/
 .run-*.log
+*.bak
