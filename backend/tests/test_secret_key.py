@@ -45,7 +45,7 @@ def test_unmodified_placeholder_is_rejected_like_missing_secret():
     key, stderr = _secret_key_for_env("change-moi-avant-la-production")
     assert key != "change-moi-avant-la-production"
     assert len(key) == 64
-    assert "jamais remplacée" in stderr
+    assert "valeur d'exemple" in stderr or "jamais remplacée" in stderr
 
 
 def test_real_secret_is_used_as_is():

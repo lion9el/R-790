@@ -32,6 +32,19 @@ from auth import get_current_user as _decode_and_verify_signature
 from realtime import manager
 from ratelimit import rate_limit
 from config import settings
+from services.common import (
+    now,
+    normalize_for_search as _normalize_for_search,
+    extract_hashtags as _extract_hashtags,
+    extract_mentions as _extract_mentions,
+    index_hashtags as _index_hashtags,
+    deindex_hashtags as _deindex_hashtags,
+    create_notification as _create_notification,
+    create_mention_notifications as _create_mention_notifications,
+    serialize_posts as _serialize_posts,
+    serialize_post as _serialize_post,
+)
+from services.images import save_uploaded_image as _save_uploaded_image, UPLOAD_DIR
 
 try:
     import searchengine
@@ -40,22 +53,6 @@ except ImportError:
         "Le module 'searchengine' (extension C) est introuvable. "
         "Compile-le avec : cd c_ext && python3 setup.py build_ext --inplace"
     )
-
-import unicodedata
-
-def _normalize_for_search(text: str) -> str:
-    """Normalise le texte avant indexation/recherche C.
-
-    - NFD + suppression des diacritiques → "café" devient "cafe"
-    - lower()
-    Cela permet au moteur C (ASCII-centric) de matcher correctement les
-    mots accentués français sans complexifier le code C avec UTF-8 multi-octet.
-    """
-    if not text:
-        return ""
-    nfkd = unicodedata.normalize("NFD", text)
-    without_accents = "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
-    return without_accents.lower()
 
 
 def get_current_user(authorization: str = Header(default=None)) -> dict:
@@ -168,120 +165,11 @@ app.add_middleware(SecurityHeadersMiddleware)
 # Les fichiers uploadés sont stockés tels quels sur disque (pas en base),
 # dans backend/uploads/. Ce dossier est hors Git (voir .gitignore) : le
 # contenu uploadé est propre à chaque environnement, comme la base SQLite.
-UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Seuls ces types MIME sont acceptés. Le Content-Type déclaré par le client
-# sert de filtre initial ET détermine l'extension du fichier stocké, mais
-# n'est PAS la seule vérification : ce header est entièrement falsifiable
-# (n'importe qui peut envoyer n'importe quels octets avec l'en-tête de son
-# choix via curl/Postman, pas besoin d'un navigateur). Le contenu réel est
-# donc revérifié plus bas avec Pillow (magic bytes), voir _save_uploaded_image.
-ALLOWED_IMAGE_TYPES = {
-    "image/png": (".png", "PNG"),
-    "image/jpeg": (".jpg", "JPEG"),
-    "image/gif": (".gif", "GIF"),
-    "image/webp": (".webp", "WEBP"),
-}
-MAX_IMAGE_SIZE = settings.max_image_size
-MAX_IMAGE_DIMENSION = settings.max_image_dimension
-UPLOAD_CHUNK_SIZE = 64 * 1024  # taille des blocs lus depuis le flux réseau
-
-# Délai laissé au client pour envoyer son message d'authentification une
-# fois le WebSocket accepté (voir websocket_endpoint).
 AUTH_TIMEOUT_SECONDS = settings.auth_timeout_seconds
 
 
-async def _read_upload_with_limit(upload: UploadFile, max_size: int) -> bytes:
-    """Lit un fichier uploadé par blocs, en abandonnant dès que `max_size`
-    est dépassé, plutôt que de lire tout le corps de la requête en mémoire
-    avant de vérifier sa taille. Sans ça, un client (pas forcément un
-    navigateur — curl, script) pourrait envoyer un fichier de plusieurs Go
-    et faire lire l'intégralité en RAM avant que la vérification de taille
-    n'ait la moindre chance de s'exécuter.
-    """
-    chunks = []
-    total = 0
-    while True:
-        chunk = await upload.read(UPLOAD_CHUNK_SIZE)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > max_size:
-            raise HTTPException(status_code=400, detail="Image trop volumineuse (5 Mo maximum).")
-        chunks.append(chunk)
-    return b"".join(chunks)
 
-
-async def _save_uploaded_image(image: UploadFile) -> str:
-    """Valide et enregistre une image uploadée, renvoie son nom de fichier.
-
-    - Le type déclaré est vérifié contre une liste blanche (pas de .exe,
-      .php, etc. déguisés en image via l'en-tête Content-Type).
-    - Le CONTENU est ensuite revérifié avec Pillow (`Image.open(...).verify()`
-      puis contrôle du format détecté) : un fichier dont les octets ne sont
-      pas réellement une image du format annoncé est rejeté, même si son
-      Content-Type déclaré était dans la liste blanche. Sans cette étape,
-      n'importe quel fichier passerait la validation en se contentant de
-      mentir sur son Content-Type.
-    - Le nom de fichier final est généré aléatoirement (UUID) : on ignore
-      totalement le nom envoyé par le client, ce qui élimine tout risque de
-      "path traversal" (ex: un nom de fichier contenant "../../").
-    - La taille est plafonnée à MAX_IMAGE_SIZE, vérifiée au fil de la
-      lecture (voir _read_upload_with_limit) plutôt qu'après coup.
-    """
-    if image.content_type not in ALLOWED_IMAGE_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail="Format d'image non supporté (formats acceptés : PNG, JPEG, GIF, WEBP).",
-        )
-    extension, expected_format = ALLOWED_IMAGE_TYPES[image.content_type]
-
-    data = await _read_upload_with_limit(image, MAX_IMAGE_SIZE)
-    if len(data) == 0:
-        raise HTTPException(status_code=400, detail="Fichier image vide.")
-
-    try:
-        with Image.open(io.BytesIO(data)) as probe:
-            probe.verify()  # lève une exception si ce ne sont pas des octets d'image valides
-        # verify() consomme/invalide l'objet ouvert : il faut rouvrir pour
-        # pouvoir encore lire son format détecté juste après.
-        with Image.open(io.BytesIO(data)) as reopened:
-            actual_format = reopened.format
-            width, height = reopened.size
-    except (UnidentifiedImageError, OSError, ValueError):
-        raise HTTPException(status_code=400, detail="Le fichier envoyé n'est pas une image valide.")
-
-    if actual_format != expected_format:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Le contenu du fichier ({actual_format or 'format inconnu'}) ne correspond pas "
-                f"au type déclaré ({expected_format})."
-            ),
-        )
-
-    if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Image trop grande ({width}x{height}). Maximum {MAX_IMAGE_DIMENSION}px de côté.",
-        )
-
-    filename = uuid.uuid4().hex + extension
-    filepath = os.path.join(UPLOAD_DIR, filename)
-    with open(filepath, "wb") as f:
-        f.write(data)
-    return filename
-
-
-def now() -> str:
-    """Horodatage courant en UTC, format ISO 8601 (ex: 2026-07-25T10:00:00).
-
-    Utilisé pour horodater tout ce qui est inséré en base (posts, likes,
-    commentaires, messages, follows) afin de garder une référence commune
-    indépendante du fuseau horaire de chaque utilisateur.
-    """
-    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat()
 
 
 # ---------- Temps réel (WebSocket) ----------
@@ -524,31 +412,6 @@ def update_profile(body: ProfileIn, user=Depends(get_current_user)):
 # hors ligne au moment de l'événement, l'utilisateur la retrouve plus tard
 # via GET /api/notifications.
 
-def _create_notification(conn, user_id, ntype, from_username, post_id=None, content=None):
-    """Insère une notification en base et la renvoie sérialisée (dict JSON).
-
-    N'envoie rien par WebSocket elle-même : c'est à l'appelant de décider si
-    un push temps réel est nécessaire (voir like_post, follow_user — pour
-    les messages, l'événement WebSocket "message" existant suffit déjà,
-    donc aucun push supplémentaire n'est fait pour ce type).
-    """
-    created_at = now()
-    cur = conn.execute(
-        "INSERT INTO notifications (user_id, type, from_username, post_id, content, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, ntype, from_username, post_id, content, created_at),
-    )
-    conn.commit()
-    return {
-        "id": cur.lastrowid,
-        "type": ntype,
-        "from": from_username,
-        "post_id": post_id,
-        "content": content,
-        "created_at": created_at,
-        "is_read": False,
-    }
-
 
 @app.get("/api/notifications")
 def list_notifications(limit: int = 30, user=Depends(get_current_user)):
@@ -578,152 +441,9 @@ def list_notifications(limit: int = 30, user=Depends(get_current_user)):
         return result
 
 
-# ---------- Hashtags et mentions ----------
-# Deux mini-fonctionnalités indépendantes qui partagent la même logique
-# d'extraction par expression régulière sur le texte d'un post ou commentaire :
-# - un hashtag (#exemple) sert à retrouver tous les posts qui le contiennent
-#   (table post_hashtags, indépendante du moteur de recherche C : on veut un
-#   classement chronologique exact, pas un score de pertinence textuelle) ;
-# - une mention (@pseudo) déclenche une notification pour l'utilisateur visé,
-#   s'il existe et si ce n'est pas lui-même qui se mentionne.
-
-# \w capture aussi les lettres accentuées en Python 3 (re.UNICODE par défaut),
-# donc #café ou @François fonctionnent. Longueur plafonnée pour éviter un
-# hashtag/mention démesuré construit exprès pour abuser du stockage.
-HASHTAG_RE = re.compile(r"#(\w{1,50})", re.UNICODE)
-MENTION_RE = re.compile(r"@(\w{1,30})", re.UNICODE)
-
-
-def _extract_hashtags(text: str) -> set[str]:
-    """Extrait les hashtags d'un texte, normalisés en minuscules et sans
-    doublons (#Python et #python comptent comme un seul hashtag)."""
-    return {tag.lower() for tag in HASHTAG_RE.findall(text)}
-
-
-def _extract_mentions(text: str) -> set[str]:
-    """Extrait les noms d'utilisateur mentionnés (@pseudo) dans un texte,
-    sans doublons. La casse est conservée ici ; la recherche du compte
-    correspondant se fait ensuite insensible à la casse (COLLATE NOCASE)."""
-    return set(MENTION_RE.findall(text))
-
-
-def _index_hashtags(conn, post_id: int, content: str) -> None:
-    """Enregistre les hashtags d'un post dans `post_hashtags`."""
-    for tag in _extract_hashtags(content):
-        conn.execute(
-            "INSERT OR IGNORE INTO post_hashtags (post_id, hashtag) VALUES (?, ?)",
-            (post_id, tag),
-        )
-
-
-def _deindex_hashtags(conn, post_id: int) -> None:
-    """Retire tous les hashtags associés à un post (avant réindexation lors
-    d'une édition, ou lors d'une suppression)."""
-    conn.execute("DELETE FROM post_hashtags WHERE post_id = ?", (post_id,))
-
-
-def _create_mention_notifications(conn, content: str, post_id: int, actor_id: int, actor_username: str, only_usernames=None) -> list:
-    """Crée une notification 'mention' pour chaque utilisateur valide
-    mentionné (@pseudo) dans `content`, hors auto-mention.
-
-    `only_usernames` : si fourni, restreint les notifications à cet
-    ensemble de pseudos déjà extraits ailleurs (utilisé par `edit_post` pour
-    ne notifier que les mentions nouvellement ajoutées lors d'une édition,
-    tout en gardant un aperçu du texte réellement publié dans la
-    notification plutôt qu'un texte reconstitué). Par défaut (`None`), les
-    mentions sont extraites directement de `content`.
-
-    Ne fait AUCUN appel réseau/WebSocket elle-même (voir _create_notification) :
-    renvoie juste la liste des `(user_id, notification)` à pousser en temps
-    réel, à traiter par l'appelant après la fermeture du `with get_conn()`,
-    comme pour les notifications de like et de follow.
-    """
-    snippet = content[:80] + ("…" if len(content) > 80 else "")
-    usernames = only_usernames if only_usernames is not None else _extract_mentions(content)
-    to_push = []
-    for uname in usernames:
-        target = conn.execute(
-            "SELECT id, username FROM users WHERE username = ? COLLATE NOCASE", (uname,)
-        ).fetchone()
-        if not target or target["id"] == actor_id:
-            continue
-        notification = _create_notification(
-            conn, target["id"], "mention", actor_username, post_id=post_id, content=snippet
-        )
-        to_push.append((target["id"], notification))
-    return to_push
-
 
 # ---------- Posts / fil d'actualité ----------
 
-def _serialize_posts(conn, rows, current_user_id):
-    """Transforme des lignes SQL `posts` en dicts JSON prêts pour l'API.
-
-    Les compteurs (likes, commentaires), l'auteur et le fait que
-    l'utilisateur courant ait liké sont récupérés pour TOUS les posts de la
-    page en une poignée de requêtes groupées, au lieu d'une série de
-    requêtes par post (problème du "N+1" : un fil de 30 posts coûtait 120
-    allers-retours en base). Le préfixe `_` indique un détail
-    d'implémentation interne à ce fichier, pas une route API.
-    """
-    rows = list(rows)
-    if not rows:
-        return []
-
-    post_ids = [row["id"] for row in rows]
-    placeholders = ",".join("?" * len(post_ids))
-
-    like_counts = {
-        r["post_id"]: r["c"]
-        for r in conn.execute(
-            f"SELECT post_id, COUNT(*) c FROM likes WHERE post_id IN ({placeholders}) GROUP BY post_id",
-            post_ids,
-        )
-    }
-    comment_counts = {
-        r["post_id"]: r["c"]
-        for r in conn.execute(
-            f"SELECT post_id, COUNT(*) c FROM comments WHERE post_id IN ({placeholders}) GROUP BY post_id",
-            post_ids,
-        )
-    }
-    liked_by_me = {
-        r["post_id"]
-        for r in conn.execute(
-            f"SELECT post_id FROM likes WHERE user_id = ? AND post_id IN ({placeholders})",
-            [current_user_id, *post_ids],
-        )
-    }
-    author_ids = list({row["user_id"] for row in rows})
-    authors = {
-        r["id"]: r["username"]
-        for r in conn.execute(
-            f"SELECT id, username FROM users WHERE id IN ({','.join('?' * len(author_ids))})",
-            author_ids,
-        )
-    }
-
-    serialized = []
-    for row in rows:
-        image_path = row["image_path"] if "image_path" in row.keys() else None
-        serialized.append(
-            {
-                "id": row["id"],
-                "author": authors[row["user_id"]],
-                "content": row["content"],
-                "created_at": row["created_at"],
-                "likes": like_counts.get(row["id"], 0),
-                "liked_by_me": row["id"] in liked_by_me,
-                "comments": comment_counts.get(row["id"], 0),
-                "image_url": f"/uploads/{image_path}" if image_path else None,
-            }
-        )
-    return serialized
-
-
-def _serialize_post(conn, row, current_user_id):
-    """Version à un seul post de `_serialize_posts`."""
-    return _serialize_posts(conn, [row], current_user_id)[0]
 
 
 @app.post("/api/posts")

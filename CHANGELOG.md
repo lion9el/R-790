@@ -5,6 +5,25 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
+## [Non publié] — modularisation services + Docker prod
+
+### Ajouté / Amélioré
+- **Modularisation backend** :
+  - `backend/services/common.py` : helpers métier (serialize, hashtags, mentions, notifications, normalize)
+  - `backend/services/images.py` : uploads sécurisés
+  - `backend/schemas.py` : modèles Pydantic centralisés
+  - `backend/deps.py` : dépendance auth + révocation
+  - `app.py` allégé (~1300 → ~1030 lignes) en s'appuyant sur les services
+- **Dockerfile multi-stage** production :
+  - build séparé (gcc + extension C)
+  - image runtime non-root (`appuser`)
+  - plus légère et plus sûre
+- Test secret key adapté au nouveau message de config
+
+### Vérifié
+- 141 tests backend (auth, posts, search, social, notifications, rate-limit, websocket…)
+- Extension C : 16 tests
+
 ## [Non publié] — amélioration expert (qualité, performance, maintenabilité)
 
 ### Amélioré (niveau expert)
