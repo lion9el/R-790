@@ -5,6 +5,37 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
+## [Non publié] — fonctionnalités indispensables + documentation
+
+### Ajouté
+- **Compte & sécurité**
+  - Changer de mot de passe (`POST /api/account/change-password`, commande `passwd`)
+  - Reset mot de passe par token 1h (`reset-request` / `reset-confirm`)
+  - Suppression définitive du compte avec cascade + fichiers (`delete-account`)
+  - Export RGPD (`GET /api/account/export`, commande `export`)
+- **Profil enrichi**
+  - `display_name`, `avatar_path`, `is_private` sur `users`
+  - Commandes `setname`, `privacy on|off`
+  - `PATCH /api/me/profile` (multipart avatar possible)
+- **Modération**
+  - Blocage / déblocage (`block` / `unblock` / `blocks`) — coupe follow + DM
+  - Signalements (`report post|user|comment`)
+  - Bookmarks (`bookmark` / `unbookmark` / `bookmarks`)
+  - Comptes privés + demandes de follow (`requests` / `accept` / `reject`)
+- Tables : `blocks`, `reports`, `bookmarks`, `follow_requests`,
+  `password_reset_tokens`, `refresh_tokens`
+- Services `account.py` et `moderation.py`
+- 8 tests dédiés (`test_account_moderation.py`) — **149 tests** au total
+
+### Documentation
+- `README.md` entièrement réécrit (toutes les commandes et API)
+- `ARCHITECTURE.md` à jour (services, schéma, flux critiques)
+- Ce CHANGELOG
+
+### Vérifié
+- Suite backend complète verte
+- Extension C inchangée côté API publique
+
 ## [Non publié] — modularisation services + Docker prod
 
 ### Ajouté / Amélioré

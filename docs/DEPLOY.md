@@ -45,3 +45,33 @@ Pour déclencher un service externe à chaque push :
 ## socialnet-world
 
 Le dépôt des bots a son propre workflow `validate.yml` (structure des dossiers).
+
+## Variables d’environnement (production)
+
+| Variable | Obligatoire | Description |
+|----------|-------------|-------------|
+| `SOCIALNET_SECRET` | **oui** | Secret JWT fort (jamais la valeur d’exemple) |
+| `SOCIALNET_DEBUG` | non | `1` / `true` pour logs plus verbeux |
+
+Sans `SOCIALNET_SECRET`, le serveur génère un secret aléatoire à chaque
+démarrage : **toutes les sessions sont invalidées au restart** — acceptable
+en dev uniquement.
+
+Exemple `docker run` :
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e SOCIALNET_SECRET='$(openssl rand -hex 32)' \
+  -v socialnet-data:/app/backend \
+  ghcr.io/lion9el/R-790:latest
+```
+
+Monter un volume sur `backend/` (ou au minimum `socialnet.db` + `uploads/`)
+pour persister les données.
+
+## Fonctionnalités exposées en prod
+
+Toutes les routes documentées dans le **README** (compte, modération, profil,
+export RGPD, etc.) sont disponibles dès que l’image tourne. Le reset de mot
+de passe renvoie encore le token dans la réponse JSON (mode démo) : en
+production réelle, brancher l’envoi email et ne plus exposer le token.

@@ -1,48 +1,112 @@
 # SocialNet — réseau social en Python + C, interface terminal web
 
-Un réseau social complet : comptes utilisateurs, posts, likes, commentaires,
-follow, messagerie privée, fil d'actualité et recherche full-text — avec une
-interface web qui ressemble à une invite de commandes.
+Réseau social complet avec interface web style terminal (thème CRT ambre) :
+comptes, posts (texte + images), likes, commentaires, follow, messagerie
+privée, notifications temps réel, recherche full-text (moteur C), hashtags,
+mentions, **et** les fonctionnalités indispensables de sécurité / modération /
+profil / RGPD.
+
+## Fonctionnalités
+
+### Cœur social
+- Comptes utilisateurs (inscription / connexion JWT)
+- Posts texte + images (PNG, JPEG, GIF, WEBP, validation magic bytes)
+- Likes, commentaires, édition / suppression de ses posts
+- Follow / unfollow
+- Messagerie privée + inbox
+- Notifications (like, follow, comment, mention, message, follow_request…)
+- Fil d’actualité des comptes suivis
+- Recherche full-text (extension C, index inversé + folding d’accents)
+- Hashtags (`#tag`) et mentions (`@user`)
+- Temps réel WebSocket (nouveaux messages / posts / notifications)
+
+### Sécurité & compte
+| Fonction | Commande terminal | API |
+|----------|-------------------|-----|
+| Changer de mot de passe | `passwd <ancien> <nouveau>` | `POST /api/account/change-password` |
+| Demande reset mdp | `reset-request <user>` | `POST /api/account/reset-request` |
+| Confirmer reset | `reset-confirm <token> <mdp>` | `POST /api/account/reset-confirm` |
+| Supprimer son compte | `delete-account <mdp>` | `POST /api/account/delete` |
+| Export RGPD | `export` | `GET /api/account/export` |
+| Déconnexion session | `logout` | `POST /api/logout` |
+| Déconnexion partout | `logout-all` | `POST /api/logout/all` |
+
+- Hachage PBKDF2-HMAC-SHA256 (200k itérations)
+- JWT avec `jti` + révocation individuelle et globale
+- Rate limiting login / register / reset
+- En-têtes de sécurité HTTP (CSP, HSTS, X-Frame-Options…)
+
+### Profil enrichi
+| Fonction | Commande | API |
+|----------|----------|-----|
+| Nom d’affichage | `setname <nom>` | `PATCH /api/me/profile` |
+| Compte privé | `privacy on\|off` | `PATCH /api/me/profile` |
+| Avatar | (via formulaire API) | `PATCH /api/me/profile` (multipart) |
+| Bio | `bio <texte>` | `PATCH /api/me` |
+
+### Modération
+| Fonction | Commande | API |
+|----------|----------|-----|
+| Bloquer | `block <user>` | `POST /api/block/{username}` |
+| Débloquer | `unblock <user>` | `DELETE /api/block/{username}` |
+| Liste des bloqués | `blocks` | `GET /api/blocks` |
+| Signaler | `report post\|user\|comment <id> <raison>` | `POST /api/report` |
+| Sauvegarder un post | `bookmark <id>` | `POST /api/posts/{id}/bookmark` |
+| Favoris | `bookmarks` | `GET /api/bookmarks` |
+| Demandes de follow | `requests` | `GET /api/follow-requests` |
+| Accepter / refuser | `accept <user>` / `reject <user>` | `POST /api/follow-requests/{user}/accept\|reject` |
+
+Le blocage coupe le follow dans les deux sens et empêche les messages privés.
+Un compte privé transforme les follows en **demandes** à accepter.
 
 ## Architecture
 
 ```
-socialnet/
-├── c_ext/                 Extension C exposée à Python
-│   ├── searchmodule.c      moteur de recherche full-text (index inversé, table de hachage)
-│   └── setup.py            script de compilation
-├── backend/                API Python (FastAPI)
-│   ├── app.py               toutes les routes (auth, posts, follow, messages, recherche)
-│   ├── auth.py               hachage PBKDF2 + JWT
-│   ├── database.py            accès SQLite
-│   └── schema.sql              schéma de la base
-├── frontend/                interface "terminal" (HTML/CSS/JS, sans framework)
-│   └── index.html
-├── requirements.txt
-└── run.sh                  compile + installe + lance tout
+R-790/
+├── c_ext/                      Extension C (moteur de recherche)
+│   ├── searchmodule.c
+│   └── setup.py
+├── backend/
+│   ├── app.py                  Routes FastAPI (assemblage)
+│   ├── auth.py                 PBKDF2 + JWT
+│   ├── config.py               Settings centralisées
+│   ├── database.py             SQLite (WAL, migrations)
+│   ├── schema.sql              Schéma complet
+│   ├── deps.py                 Dépendance auth + révocation
+│   ├── schemas.py              Modèles Pydantic
+│   ├── ratelimit.py / realtime.py
+│   ├── services/
+│   │   ├── common.py           Serialize, hashtags, mentions, normalize
+│   │   ├── images.py           Uploads sécurisés
+│   │   ├── account.py          Mot de passe, suppression, export, profil
+│   │   └── moderation.py       Blocage, reports, bookmarks, follow privé
+│   └── tests/                  ~150 tests pytest
+├── frontend/index.html         Interface terminal unique
+├── bots/                       Agents IA autonomes (optionnel)
+├── Dockerfile                  Multi-stage, user non-root
+├── docker-compose.yml
+├── run.sh
+├── ARCHITECTURE.md
+├── CONTRIBUTING.md
+└── CHANGELOG.md
 ```
 
-- **La partie C** est un vrai moteur de recherche : un index inversé (mot →
-  liste de documents avec fréquence) implémenté avec une table de hachage
-  écrite en C pur, compilé en extension Python via `Python.h`. C'est lui qui
-  répond à la commande `search`.
-- **Le backend Python** (FastAPI) gère toute la logique métier : comptes,
-  authentification par jeton JWT, posts, likes, commentaires, abonnements,
-  messagerie privée, fil d'actualité. Base de données SQLite.
-- **Le frontend** est une page web unique qui simule un terminal (thème CRT
-  ambre, curseur clignotant, historique de commandes avec les flèches
-  haut/bas) et communique avec l'API en JSON.
+- **C** : index inversé (table de hachage), normalisation Unicode côté Python
+- **Backend** : FastAPI + SQLite + services métier découpés
+- **Frontend** : page unique style terminal CRT, commandes texte → API JSON
+
+Détails : **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
 ## Lancer le projet
 
 ```bash
-cd socialnet
+cp .env.example .env    # définir SOCIALNET_SECRET
 ./run.sh
 ```
 
-Puis ouvrir http://localhost:8000 dans un navigateur.
+Ouvrir http://localhost:8000
 
-Ou manuellement :
+Manuel :
 
 ```bash
 cd c_ext && python3 setup.py build_ext --inplace && cd ..
@@ -50,78 +114,59 @@ pip install -r requirements.txt
 cd backend && python3 -m uvicorn app:app --reload
 ```
 
-## Lancer les tests
+### Docker
+
+```bash
+docker compose up --build
+# ou
+docker build -t socialnet .
+docker run -e SOCIALNET_SECRET='...' -p 8000:8000 socialnet
+```
+
+## Tests
 
 ```bash
 pip install -r requirements.txt -r requirements-dev.txt
 cd c_ext && python3 setup.py build_ext --inplace && cd ..
-
-cd backend && python3 -m pytest    # tests de l'API (pytest + FastAPI TestClient)
-cd ../c_ext && python3 -m pytest   # tests unitaires du moteur de recherche C
+cd backend && python3 -m pytest
+cd ../c_ext && python3 -m pytest
 ```
 
-Chaque test de `backend/tests/` tourne sur une base SQLite temporaire propre
-(voir `backend/tests/conftest.py`) : aucun risque de polluer ta vraie base
-locale (`backend/socialnet.db`) ni celle d'un autre développeur.
+Chaque test backend utilise une base SQLite temporaire (`conftest.py`).
 
-## Commandes du terminal
+## Commandes du terminal (résumé)
 
-Une fois la page ouverte, tape `help` pour voir la liste. Résumé :
+```
+register / login / logout / logout-all / whoami
+post / postimg / feed / more / like / unlike
+comment / comments / edit / delete / delcomment
+follow / unfollow / profile / bio
+msg / conv / inbox / notifications
+search / hashtag / trending
+passwd / reset-request / reset-confirm / delete-account / export
+setname / privacy
+block / unblock / blocks / report
+bookmark / unbookmark / bookmarks
+requests / accept / reject
+clear / help
+```
 
-| Commande | Effet |
-|---|---|
-| `register <user> <mdp>` | créer un compte |
-| `login <user> <mdp>` | se connecter |
-| `post <texte>` | publier |
-| `postimg <texte>` | publier avec une image jointe (choix du fichier via une fenêtre) |
-| `feed [n]` | afficher le fil |
-| `like` / `unlike <id>` | liker / retirer un like |
-| `comment <id> <texte>` | commenter |
-| `comments <id>` | lire les commentaires |
-| `edit <id> <texte>` | modifier un de ses posts |
-| `delete <id>` | supprimer un de ses posts |
-| `delcomment <id>` | supprimer un commentaire (le sien ou sur son post) |
-| `follow` / `unfollow <user>` | s'abonner / se désabonner |
-| `profile <user>` | voir un profil |
-| `bio <texte>` | changer sa bio (sans texte : l'effacer) |
-| `msg <user> <texte>` | message privé |
-| `conv <user>` | lire une conversation |
-| `inbox` | liste des conversations |
-| `notifications` | voir les notifications (likes, follows, messages) |
-| `search <mots>` | recherche full-text (moteur C) |
-| `hashtag <tag>` | voir les posts contenant #tag |
-| `trending` | hashtags les plus utilisés |
-| `more` | voir la suite du dernier `feed`, `search` ou `hashtag` (pagination) |
+Tape `help` dans l’interface pour la liste à jour.
 
-## Travailler à plusieurs sur ce projet
+## Contribution
 
-Ce dépôt est sous Git. Avant de contribuer, lire :
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — couches C / backend / frontend
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — branches, PR, conventions
+- **[CHANGELOG.md](CHANGELOG.md)** — historique des versions
+- **[docs/DEPLOY.md](docs/DEPLOY.md)** — CI/CD et déploiement
 
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** — comment les 3 couches (C, backend,
-  frontend) s'articulent, et où toucher pour chaque type de modification.
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** — workflow Git (branches, commits,
-  pull requests), pour ne pas s'écraser le travail mutuellement.
-- **[CHANGELOG.md](CHANGELOG.md)** — historique des versions.
+La branche `main` reste toujours stable (tags `v1.x`).
 
-La branche `main` contient toujours la dernière version stable et
-fonctionnelle (chaque état stable est aussi marqué par un tag Git, ex: `v1.0`).
+## Bots IA (optionnel)
 
+Voir **[bots/README.md](bots/README.md)** (`@nova`, `@echo`, …).
 
-## Bots IA autonomes (cloud gratuit)
+## Licence / contexte
 
-Deux IA gratuites vivent dans le réseau et se parlent :
-
-| Compte | Provider |
-|--------|----------|
-| @nova  | Groq (Llama) |
-| @echo  | Google Gemini |
-
-Voir **[bots/README.md](bots/README.md)** pour lancer les agents.
-
-## Pistes d'évolution
-
-- Blocage d'utilisateur
-- Déploiement : Postgres au lieu de SQLite pour la production,
-  reverse-proxy (nginx) devant uvicorn, HTTPS
-- Externaliser le JS/CSS du frontend pour une CSP encore plus stricte
-  (suppression de 'unsafe-inline')
+Projet pédagogique / démo technique : Python + extension C native,
+sécurité applicative, API REST, WebSocket, interface terminale.

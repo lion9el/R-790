@@ -1,171 +1,135 @@
 # Architecture — SocialNet
 
-Ce document explique comment les différentes parties du projet s'articulent.
-À lire avant de modifier le code.
+Comment les couches s’articulent. À lire avant de modifier le code.
 
-## Vue d'ensemble
+## Vue d’ensemble
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Navigateur (frontend/index.html)                            │
-│  Terminal web : tape des commandes, affiche le résultat      │
-└───────────────────────┬────────────────────────────────────┘
-                         │  fetch() en JSON, HTTP
-                         ▼
+│  Terminal web CRT — commandes texte → JSON                   │
+└───────────────────────┬─────────────────────────────────────┘
+                        │  HTTP/JSON + WebSocket
+                        ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  Backend Python — FastAPI (backend/app.py)                   │
-│  Routes API : /api/register, /api/posts, /api/feed, ...      │
-│  Logique métier, authentification, validation des données    │
-└──────────┬───────────────────────────────┬────────────────┘
-           │                                │
-           ▼                                ▼
-┌────────────────────────┐     ┌───────────────────────────┐
-│ Base de données SQLite  │     │ Extension C (c_ext/)       │
-│ (backend/database.py)   │     │ Index inversé en mémoire   │
-│ Comptes, posts, likes,  │     │ pour la recherche full-text│
-│ commentaires, messages  │     │ (searchmodule.c)           │
-└────────────────────────┘     └───────────────────────────┘
+│  Backend FastAPI                                             │
+│  app.py          routes + middleware sécurité + lifespan     │
+│  services/       logique métier découpée                     │
+│  auth / config   JWT, PBKDF2, settings                       │
+│  deps / schemas  dépendance auth, modèles Pydantic           │
+└──────────┬───────────────────────────────┬──────────────────┘
+           │                               │
+           ▼                               ▼
+┌────────────────────────┐    ┌───────────────────────────────┐
+│ SQLite (schema.sql)     │    │ Extension C (searchmodule.c)   │
+│ users, posts, likes,    │    │ Index inversé en mémoire       │
+│ comments, follows,      │    │ index_add / search / clear     │
+│ messages, notifications │    │ + normalisation Unicode Python │
+│ blocks, reports,        │    └───────────────────────────────┘
+│ bookmarks, follow_req,  │
+│ password_reset_tokens…  │
+└────────────────────────┘
 ```
 
-## Pourquoi cette séparation
+## Principes
 
-- **Le frontend ne parle qu'en HTTP/JSON.** Il ne connaît rien de la base de
-  données ni du C. On peut donc le remplacer entièrement (par une vraie appli
-  mobile, par exemple) sans toucher au reste.
-- **Le backend Python concentre toute la logique métier** (règles, validation,
-  sécurité). C'est la seule couche qui doit changer si une règle métier change
-  (ex : longueur max d'un post).
-- **L'extension C ne fait qu'une seule chose** : indexer du texte et répondre
-  à des recherches, le plus vite possible. Elle ne connaît rien de la base de
-  données, des utilisateurs ni de HTTP — elle reçoit un `(id, texte)` et
-  renvoie des `(id, score)`. C'est volontairement isolé pour rester simple à
-  tester et remplacer.
+1. **Frontend = présentation uniquement** — HTTP/JSON, aucune logique métier.
+2. **Backend = seule source de vérité métier** — validation, sécurité, règles.
+3. **Services = logique réutilisable** — pas de routes HTTP dedans.
+4. **Extension C = une responsabilité** — indexer / chercher du texte, rien d’autre.
+5. **Migrations idempotentes** — `schema.sql` + `database._apply_migrations`.
 
-## Détail par dossier
+## Détail des modules backend
 
-### `c_ext/` — moteur de recherche en C
+| Module | Rôle |
+|--------|------|
+| `app.py` | Assemblage FastAPI : lifespan, middleware CSP/HSTS, routes, static |
+| `auth.py` | PBKDF2-HMAC-SHA256, création/décodage JWT (`jti`, `iat_ms`) |
+| `config.py` | `SOCIALNET_SECRET`, rate limits, timeouts, limites images |
+| `database.py` | Connexions SQLite (WAL, busy_timeout), migrations, helpers |
+| `deps.py` | `get_current_user` + vérification révocation |
+| `schemas.py` | Modèles Pydantic partagés |
+| `ratelimit.py` | Limitation de débit en mémoire par IP + chemin |
+| `realtime.py` | `ConnectionManager` WebSocket |
+| `services/common.py` | `now`, normalize search, hashtags, mentions, serialize posts |
+| `services/images.py` | Upload sécurisé (MIME + magic bytes + dimensions) |
+| `services/account.py` | Change/reset password, delete account, export RGPD, profil |
+| `services/moderation.py` | Blocks, reports, bookmarks, follow privé / demandes |
 
-| Fichier | Rôle |
-|---|---|
-| `searchmodule.c` | Table de hachage + index inversé. Expose `index_add`, `index_remove`, `search`, `clear` à Python via l'API `Python.h`. |
-| `setup.py` | Script de compilation (`python3 setup.py build_ext --inplace`) qui produit un fichier `.so` (Linux/WSL) ou `.pyd` (Windows natif). |
+## Schéma de données (tables principales)
 
-**Important** : le `.so` compilé n'est jamais versionné dans Git (voir
-`.gitignore`). Chaque personne le recompile localement avec `run.sh` — le
-binaire dépend de l'OS et de la version de Python.
+| Table | Usage |
+|-------|--------|
+| `users` | Comptes + `display_name`, `avatar_path`, `is_private`, `tokens_valid_after` |
+| `posts` / `likes` / `comments` | Contenu social |
+| `follows` | Abonnements acceptés |
+| `follow_requests` | Demandes vers comptes privés |
+| `messages` | DM (`is_read`) |
+| `notifications` | like, follow, comment, mention, message, follow_request… |
+| `post_hashtags` | Index hashtags (indépendant du moteur C) |
+| `revoked_tokens` | Révocation session individuelle |
+| `blocks` | Blocages mutuellement exclusifs avec follow/messages |
+| `reports` | Signalements (`user` \| `post` \| `comment`) |
+| `bookmarks` | Posts sauvegardés |
+| `password_reset_tokens` | Reset mdp (usage unique, 1h) |
+| `refresh_tokens` | Préparé pour sessions longue durée |
 
-`c_ext/tests/` contient une suite pytest (16 tests) indépendante du backend :
-indexation, scoring, tri, pagination, suppression, isolation entre tests.
+## Flux critiques
 
-### `backend/` — API Python (FastAPI)
+### Authentification
+1. `register` / `login` → JWT (7j) avec `jti` + `iat_ms`
+2. Chaque requête protégée : signature → expiration → révocation DB
+3. `logout` = révoque ce `jti` ; `logout/all` = `tokens_valid_after`
+4. Changement / reset de mdp → invalide **toutes** les sessions
 
-| Fichier | Rôle |
-|---|---|
-| `app.py` | Toutes les routes HTTP + la route WebSocket `/ws`. Point d'entrée de l'application. |
-| `auth.py` | Hachage de mot de passe (PBKDF2) et jetons de session (JWT). |
-| `database.py` | Ouverture de connexion SQLite, création des tables. |
-| `schema.sql` | Définition des tables (users, posts, likes, comments, follows, messages). |
-| `realtime.py` | Registre des connexions WebSocket actives (`ConnectionManager`) ; pousse les événements "nouveau message" et "nouveau post" aux utilisateurs connectés. |
-| `uploads/` | Images jointes aux posts, stockées telles quelles sur disque (nom généré aléatoirement). Hors Git — voir `.gitignore`. |
-| `tests/` | Suite pytest (100 tests) : auth, posts, likes, commentaires, follow, profils, messagerie, notifications, pagination, hashtags, mentions. Chaque test tourne sur une base SQLite temporaire isolée (`conftest.py`). |
-| `pytest.ini` | Configuration pytest (répertoire des tests). |
+### Follow & compte privé
+1. Cible publique → insert `follows` + notification
+2. Cible privée → insert `follow_requests` (pending) + notification
+3. Owner : `accept` / `reject` → passe en `follows` ou refuse
+4. Blocage → coupe follows + requests + refuse les DM
 
-**Notifications** : chaque like, follow, message ou mention génère une ligne
-dans la table `notifications` (voir `_create_notification` dans `app.py`),
-en plus d'un éventuel push WebSocket si le destinataire est connecté.
-Contrairement au WebSocket seul, la notification reste consultable plus
-tard via `GET /api/notifications`, même si le destinataire était hors ligne
-au moment de l'événement.
+### Recherche
+1. À l’indexation : `normalize_for_search` (NFD, sans diacritiques) puis `searchengine.index_add`
+2. À la requête : même normalisation → scores par fréquence de termes
+3. Index en mémoire : reconstruit au démarrage (`lifespan`)
 
-**Hashtags et mentions** (voir la section "Hashtags et mentions" dans
-`app.py`) : extraits par expression régulière du texte d'un post ou
-commentaire.
-- Un `#hashtag` est indexé dans la table `post_hashtags` (indépendante du
-  moteur de recherche C : on veut un tri chronologique exact via
-  `GET /api/hashtags/{tag}`, pas un score de pertinence). Réindexé à
-  l'édition d'un post, retiré à sa suppression.
-- Une `@mention` valide (compte existant, hors auto-mention) crée une
-  notification de type `mention`, comme un like ou un follow. Éditer un post
-  ne renotifie que les mentions nouvellement ajoutées, pas celles déjà
-  présentes avant l'édition.
+### Images
+1. Lecture par chunks (plafond taille)
+2. Vérification MIME déclaré + format Pillow réel + dimensions max
+3. Nom de fichier = UUID (pas de path traversal)
 
-**⚠️ Piège à connaître** : `get_conn()` ne commit **jamais** automatiquement
-à la fermeture du bloc `with` — un `conn.execute(...)` sans `conn.commit()`
-explicite est silencieusement perdu à la fermeture de la connexion (bug
-réel rencontré lors de l'ajout des hashtags : l'insertion fonctionnait dans
-les tests qui déclenchaient un commit ailleurs dans le même bloc — via une
-notification, par exemple — et échouait silencieusement sinon). Après
-chaque nouvelle écriture, vérifier qu'un `conn.commit()` la suit avant la
-fin du bloc `with`.
+## Frontend
 
-**Flux d'une requête type** (ex: publier un post) :
-1. Le frontend envoie `POST /api/posts` avec le texte et le jeton JWT
-2. `app.py` vérifie le jeton via `auth.get_current_user`
-3. `app.py` insère le post en base via `database.get_conn()`
-4. `app.py` appelle `searchengine.index_add()` pour indexer le nouveau texte
-5. `app.py` récupère la liste des abonnés (followers) et appelle
-   `realtime.manager.broadcast_to_users()` pour les notifier en direct
-6. La réponse JSON est renvoyée au frontend qui a fait la requête
+Une page `frontend/index.html` :
+- Objet `COMMANDS` : chaque commande terminal → appel API
+- WebSocket `/ws` authentifié par premier message `{token}` (jamais en query string)
+- Reconnexion exponentielle sauf logout volontaire ou 4401
 
-**Flux temps réel (WebSocket)** :
-1. Après login/register, le frontend ouvre `ws://.../ws` (sans jeton dans
-   l'URL — voir l'encart sécurité ci-dessous), puis lui envoie
-   `{"token": "<jwt>"}` comme tout premier message une fois la connexion
-   acceptée.
-2. `app.py` (`websocket_endpoint`) attend ce premier message, vérifie le
-   jeton (`auth.decode_token`) et enregistre la connexion dans
-   `realtime.manager`. Ferme sinon la connexion avec le code `4401`.
-3. Quand quelqu'un publie un post, envoie un message privé, like, suit ou
-   mentionne quelqu'un, la route HTTP correspondante appelle
-   `manager.send_to_user()` / `broadcast_to_users()`.
-4. Si le destinataire a un onglet ouvert, il reçoit l'événement JSON
-   instantanément ; sinon, rien ne se perd — il le verra en rafraîchissant
-   (`feed`, `conv <user>`, `notifications`) comme avant. Le WebSocket est un
-   "plus", pas un remplacement du fonctionnement classique par requêtes HTTP.
-5. **Reconnexion automatique** (`frontend/index.html`) : toute coupure non
-   voulue (réseau, redémarrage serveur) relance une tentative de connexion
-   avec un délai croissant (1s, 2s, 4s... plafonné à 30s), tant que
-   l'utilisateur reste connecté (jeton présent). Un échec d'authentification
-   (code `4401`, jeton expiré/invalide) n'est PAS retenté en boucle : le
-   message `🔴 Session temps réel expirée` invite à retaper `login`. Une
-   fermeture volontaire (`logout`) ne déclenche jamais de reconnexion (voir
-   `intentionalDisconnect`).
+**Ajouter une commande** : entrée dans `COMMANDS` + route API si besoin.
 
-**⚠️ Piège à connaître** : quand `connectRealtime()` remplace une connexion
-existante par une nouvelle (reconnexion, ou reconnexion manuelle après
-correction du jeton), l'ancienne connexion reçoit elle aussi un événement
-`onclose` en se fermant. Sans précaution, ce `onclose` obsolète déclenchait
-à tort une reconnexion pour une connexion déjà remplacée par une plus
-récente (bug réel rencontré pendant le développement, révélé par le test
-Playwright du scénario "jeton invalide"). Chaque `onclose` vérifie donc
-d'abord que la variable globale `socket` pointe toujours vers CE socket
-précis avant d'agir — sinon l'événement est ignoré car obsolète.
+## Où modifier quoi
 
-### `frontend/` — interface terminal
+| Objectif | Fichiers |
+|---------|----------|
+| Règle métier / validation | `schemas.py`, route dans `app.py`, éventuellement `services/*` |
+| Nouvelle table / colonne | `schema.sql` + `database._apply_migrations` |
+| Compte / mdp / export | `services/account.py` + routes account |
+| Blocage / report / bookmark | `services/moderation.py` + routes associées |
+| Recherche / scoring | `c_ext/searchmodule.c` (+ recompile) + `normalize_for_search` |
+| Commande terminal | `frontend/index.html` |
+| Style CRT | bloc `<style>` de `index.html` |
+| Config runtime | `config.py` + `.env` |
+| Tests | `backend/tests/`, `c_ext/tests/` |
 
-Une seule page HTML autonome (`index.html`), sans framework ni étape de
-build. Le "moteur" de commandes est l'objet JS `COMMANDS` : chaque commande
-tapée par l'utilisateur (`post`, `feed`, `search`...) correspond à une
-fonction qui appelle l'API puis affiche le résultat.
+## CI / Docker
 
-**Pour ajouter une nouvelle commande** : ajouter une entrée dans l'objet
-`COMMANDS` de `index.html`, et si besoin la route correspondante côté
-`backend/app.py`.
+- `.github/workflows/tests.yml` — compile C + pytest backend + C
+- `Dockerfile` multi-stage, user `appuser` non-root
+- Voir `docs/DEPLOY.md` pour GHCR / déploiement distant
 
-## Intégration continue
+## Vérifier que rien n’est cassé
 
-`.github/workflows/tests.yml` s'exécute automatiquement à chaque push sur
-`main` et à chaque pull request : il compile l'extension C puis lance les
-deux suites de tests (`c_ext/tests/`, `backend/tests/`). Une pull request
-avec des tests en échec est visible directement sur GitHub avant fusion.
-
-## Où toucher pour une modification courante
-
-| Je veux... | Je modifie... |
-|---|---|
-| Changer une règle métier (ex: longueur max d'un post) | `backend/app.py` (les classes `PostIn`, etc.) |
-| Ajouter un champ à la base de données | `backend/schema.sql` + la route concernée dans `app.py` |
-| Ajouter une commande terminal | `frontend/index.html` (objet `COMMANDS`) + route API si besoin |
-| Changer l'algorithme de recherche/scoring | `c_ext/searchmodule.c` (recompiler ensuite) |
-| Changer le style visuel du terminal | `frontend/index.html` (bloc `<style>`) |
-| Vérifier que rien n'est cassé | `cd backend && python3 -m pytest -q` et `cd c_ext && python3 -m pytest -q` |
+```bash
+cd c_ext && python3 setup.py build_ext --inplace && python3 -m pytest -q
+cd ../backend && python3 -m pytest -q
+```

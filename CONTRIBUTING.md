@@ -130,12 +130,15 @@ version plutôt que de trancher seul.
 ## Style de code attendu
 
 - **Python** : docstrings sur chaque fonction publique (voir l'existant dans
-  `backend/` comme référence). Noms de variables explicites, en anglais ou en
-  français mais cohérent dans un même fichier.
+  `backend/` et `backend/services/` comme référence). Noms de variables
+  explicites, cohérents dans un même fichier.
 - **C** : commentaire au-dessus de chaque fonction expliquant son rôle,
   entrées et sortie.
 - **JS (frontend)** : chaque commande du terminal doit avoir un usage clair
   affiché en cas d'erreur (voir le pattern existant dans `COMMANDS`).
+- **Où placer le code** : logique métier dans `backend/services/`, routes
+  minces dans `app.py`, schéma dans `schema.sql` + migrations. Voir
+  **ARCHITECTURE.md** pour le tableau « Où modifier quoi ».
 
 ## Suivi des tâches
 
