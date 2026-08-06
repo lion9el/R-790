@@ -47,6 +47,8 @@ from services.common import (
 from services.images import save_uploaded_image as _save_uploaded_image, UPLOAD_DIR
 from services import account as account_service
 from services import moderation as moderation_service
+from services import backup as backup_service
+from services import ops as ops_service
 from schemas import RegisterIn, LoginIn, ProfileIn, PostEditIn, CommentIn, MessageIn
 
 try:
@@ -124,6 +126,11 @@ async def lifespan(app: FastAPI):
     with get_conn() as conn:
         for row in conn.execute("SELECT id, content FROM posts"):
             searchengine.index_add(row["id"], _normalize_for_search(row["content"]))
+    # Backups périodiques (DB + uploads)
+    try:
+        backup_service.start_background()
+    except Exception as e:
+        print(f"[backup] non démarré: {e}")
     yield
 
 
@@ -1167,6 +1174,28 @@ def reject_follow(username: str, user=Depends(get_current_user)):
 @app.get("/api/follow-requests")
 def list_follow_requests(user=Depends(get_current_user)):
     return moderation_service.list_follow_requests(user["id"])
+
+
+
+# ---------- Ops / dashboard / backups ----------
+
+@app.get("/api/ops/status")
+def ops_status():
+    """État API, DB, chronique, bots, backups (JSON)."""
+    return ops_service.status()
+
+
+@app.post("/api/ops/backup")
+def ops_backup(user=Depends(get_current_user)):
+    """Déclenche un snapshot immédiat (authentifié)."""
+    return backup_service.run_backup()
+
+
+@app.get("/ops")
+def ops_dashboard():
+    """Dashboard HTML unique (auto-refresh)."""
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(ops_service.status_html())
 
 
 # ---------- Frontend statique (interface terminal) ----------

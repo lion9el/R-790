@@ -75,3 +75,33 @@ Toutes les routes documentées dans le **README** (compte, modération, profil,
 export RGPD, etc.) sont disponibles dès que l’image tourne. Le reset de mot
 de passe renvoie encore le token dans la réponse JSON (mode démo) : en
 production réelle, brancher l’envoi email et ne plus exposer le token.
+
+
+## Backups (Phase 2)
+
+Variables :
+
+| Variable | Défaut | Rôle |
+|----------|--------|------|
+| `SOCIALNET_BACKUP_DIR` | `./backups` | Dossier des snapshots |
+| `SOCIALNET_BACKUP_INTERVAL` | `3600` | Secondes entre backups auto |
+| `SOCIALNET_BACKUP_KEEP` | `14` | Nombre de snapshots conservés |
+
+Manuel :
+
+```bash
+./scripts/backup.sh
+# ou POST /api/ops/backup (authentifié)
+```
+
+Chaque snapshot contient `socialnet.db` (+ wal/shm) et `uploads.tar.gz`.
+
+## Postgres (optionnel)
+
+```bash
+docker compose --profile postgres up -d db
+```
+
+L'application utilise encore **SQLite** par défaut. Le service Postgres
+est provisionné pour une migration future (`DATABASE_URL`). Ne pas pointer
+l'app dessus sans migration de schéma.

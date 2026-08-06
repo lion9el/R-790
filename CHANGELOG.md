@@ -5,6 +5,18 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
+## [Non publié] — Phase 2 : backups, dashboard ops, Postgres optionnel
+
+### Ajouté
+- `backend/services/backup.py` : snapshots DB + uploads, prune, thread auto
+- `backend/services/ops.py` + routes `GET /ops`, `GET /api/ops/status`, `POST /api/ops/backup`
+- `scripts/backup.sh` : snapshot manuel
+- `docker-compose.yml` : volume backups + profile `postgres` (Postgres 16)
+- Dashboard unique (API, chronique, bots, backups)
+
+### Doc
+- README (`/ops`), docs/DEPLOY (backups, Postgres)
+
 ## [Non publié] — Phase 1 : start-all + chronique monde
 
 ### Ajouté

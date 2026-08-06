@@ -1,11 +1,12 @@
-# SocialNet — démarrage local / production simple
+# SocialNet — local / production
 #
-# Usage :
+# Défaut (SQLite persisté) :
 #   docker compose up --build
-#   Puis ouvrir http://localhost:8000
 #
-# En production, définissez absolument SOCIALNET_SECRET
-# (voir .env.example) et montez un volume pour la base + uploads.
+# Avec Postgres (profil) — réservé phase 2+ / prod :
+#   docker compose --profile postgres up --build
+#   (l'app utilise encore SQLite par défaut ; Postgres est prêt pour
+#    migration future via DATABASE_URL — voir docs/DEPLOY.md)
 
 services:
   socialnet:
@@ -13,13 +14,42 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # OBLIGATOIRE en production. Générez une valeur forte avec :
-      #   python3 -c "import secrets; print(secrets.token_hex(32))"
       - SOCIALNET_SECRET=${SOCIALNET_SECRET:-change-moi-avant-la-production}
+      - SOCIALNET_BACKUP_DIR=/app/backups
+      - SOCIALNET_BACKUP_INTERVAL=${SOCIALNET_BACKUP_INTERVAL:-3600}
+      - SOCIALNET_BACKUP_KEEP=${SOCIALNET_BACKUP_KEEP:-14}
+      # Futur : DATABASE_URL=postgresql://socialnet:socialnet@db:5432/socialnet
     volumes:
-      # Persistance de la base SQLite et des images uploadées
       - socialnet-data:/app/backend
+      - socialnet-backups:/app/backups
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Postgres optionnel (profile) — infrastructure « grande entreprise »
+  db:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: socialnet
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-socialnet}
+      POSTGRES_DB: socialnet
+    volumes:
+      - socialnet-pg:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U socialnet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   socialnet-data:
+  socialnet-backups:
+  socialnet-pg:

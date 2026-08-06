@@ -54,3 +54,7 @@ bots/world/*
 bots/memory/dashboard.html
 bots/memory/journal/
 bots/socialnet-world-clone/
+
+# Snapshots locaux
+backups/
+.run-*.log

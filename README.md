@@ -129,10 +129,17 @@ pip install -r requirements.txt
 cd backend && python3 -m uvicorn app:app --reload
 ```
 
+### Dashboard ops
+
+Après démarrage : **http://127.0.0.1:8000/ops**  
+État API, comptes, chronique, bots, backups (auto-refresh).
+
 ### Docker
 
 ```bash
 docker compose up --build
+# Postgres optionnel (infra prête) :
+# docker compose --profile postgres up --build
 # ou
 docker build -t socialnet .
 docker run -e SOCIALNET_SECRET='...' -p 8000:8000 socialnet

@@ -40,12 +40,13 @@ COPY --from=builder /build/c_ext/setup.py ./c_ext/
 COPY backend/ ./backend/
 COPY frontend/ ./frontend/
 
-RUN mkdir -p backend/uploads \
+RUN mkdir -p backend/uploads backups \
     && chown -R appuser:appuser /app
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    SOCIALNET_SECRET=""
+    SOCIALNET_SECRET="" \
+    SOCIALNET_BACKUP_DIR=/app/backups
 
 USER appuser
 

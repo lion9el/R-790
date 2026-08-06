@@ -55,6 +55,8 @@ Comment les couches s’articulent. À lire avant de modifier le code.
 | `services/images.py` | Upload sécurisé (MIME + magic bytes + dimensions) |
 | `services/account.py` | Change/reset password, delete account, export RGPD, profil |
 | `services/moderation.py` | Blocks, reports, bookmarks, follow privé / demandes |
+| `services/backup.py` | Snapshots SQLite + uploads, prune |
+| `services/ops.py` | Dashboard `/ops` (API, chronique, bots, backups) |
 
 ## Schéma de données (tables principales)
 
