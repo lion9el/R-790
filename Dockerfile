@@ -15,10 +15,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+# setuptools requis pour compiler l'extension C (python:slim ne l'embarque plus)
+RUN pip install --no-cache-dir setuptools wheel     && pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 COPY c_ext/ ./c_ext/
-RUN cd c_ext && python setup.py build_ext --inplace
+RUN cd c_ext && python setup.py build_ext --inplace     && ls -la searchengine*.so
 
 # ---------- Stage 2: runtime minimal ----------
 FROM python:3.12-slim
