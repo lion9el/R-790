@@ -1,55 +1,25 @@
-"""Authentification : hachage de mot de passe (PBKDF2) et jetons JWT."""
+"""Authentification : hachage de mot de passe (PBKDF2) et jetons JWT.
+
+Ce module reste volontairement sans dépendance à `database` pour rester
+testable isolément. La vérification de révocation (DB) est appliquée
+par-dessus dans app.py / les routers.
+"""
+from __future__ import annotations
+
 import hashlib
-import os
 import secrets
-import sys
 import time
 import uuid
+from typing import Any
+
 import jwt
 from fastapi import Header, HTTPException
 
-# Charge backend/.env s'il existe, pour que SOCIALNET_SECRET (voir
-# .env.example) soit réellement pris en compte. Avant ce correctif, .env
-# n'était lu par personne : le fichier ne servait à rien, et la valeur par
-# défaut ci-dessous (un secret FAIBLE, car visible dans le code source
-# public) était utilisée silencieusement même quand un développeur avait
-# suivi les instructions et rempli son .env.
-try:
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
-except ImportError:
-    pass  # python-dotenv absent : on retombe sur les vraies variables d'environnement.
+from config import settings
 
-_PLACEHOLDER_SECRET = "change-moi-avant-la-production"
-_env_secret = os.environ.get("SOCIALNET_SECRET")
-
-if _env_secret and _env_secret != _PLACEHOLDER_SECRET:
-    SECRET_KEY = _env_secret
-else:
-    # Pas de SOCIALNET_SECRET configuré : on génère un secret aléatoire fort
-    # (32 octets, jamais prévisible ni codé en dur) plutôt que de retomber
-    # sur une valeur fixe connue de quiconque lit le code source. La
-    # contrepartie assumée : ce secret change à chaque redémarrage du
-    # process, donc tous les jetons émis avant un restart deviennent
-    # invalides — acceptable en développement, PAS en production (d'où
-    # l'avertissement explicite ci-dessous, qui doit alerter quiconque
-    # démarre le serveur sans avoir configuré .env).
-    SECRET_KEY = secrets.token_hex(32)
-    _reason = (
-        "SOCIALNET_SECRET vaut encore la valeur d'exemple de .env.example (jamais remplacée)"
-        if _env_secret == _PLACEHOLDER_SECRET
-        else "SOCIALNET_SECRET n'est pas défini"
-    )
-    print(
-        "\n"
-        f"⚠️  {_reason} : un secret aléatoire temporaire a été généré pour cette exécution.\n"
-        "    Toutes les sessions seront invalidées au prochain redémarrage du serveur.\n"
-        "    Ne JAMAIS lancer en production sans définir un vrai SOCIALNET_SECRET (voir .env.example).\n",
-        file=sys.stderr,
-    )
-
-JWT_ALGO = "HS256"
-TOKEN_LIFETIME_SECONDS = 60 * 60 * 24 * 7  # 7 jours
+SECRET_KEY = settings.secret_key
+JWT_ALGO = settings.jwt_algorithm
+TOKEN_LIFETIME_SECONDS = settings.token_lifetime_seconds
 
 
 def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
@@ -70,30 +40,16 @@ def create_token(user_id: int, username: str) -> str:
     payload = {
         "sub": str(user_id),
         "username": username,
-        "iat": int(t),  # standard JWT ("issued at"), résolution seconde
-        # Même horodatage d'émission, mais en MILLISECONDES : sert
-        # uniquement à comparer l'ordre de deux jetons de façon fiable pour
-        # la révocation globale (voir app.py::logout_all et
-        # _reject_if_revoked). Avec une résolution seconde seule, deux
-        # jetons émis pendant la même seconde (ex: un test automatisé qui
-        # enchaîne login → logout_all → login en quelques millisecondes)
-        # deviendraient indiscernables, et le second login se ferait
-        # révoquer par erreur alors qu'il a eu lieu APRÈS la déconnexion
-        # globale. La résolution milliseconde rend cette collision
-        # négligeable en pratique (chaque appel HTTP/SQLite prend >>1ms).
+        "iat": int(t),
+        # iat_ms : résolution milliseconde pour la révocation globale fiable
         "iat_ms": int(t * 1000),
         "exp": int(t) + TOKEN_LIFETIME_SECONDS,
-        # Identifiant unique de CE jeton précis (une "session") : sert à la
-        # révocation individuelle (voir app.py logout / table revoked_tokens).
-        # Sans lui, il n'y aurait aucun moyen de désigner un jeton précis à
-        # invalider — deux jetons émis à la même seconde pour le même
-        # utilisateur seraient indiscernables.
         "jti": uuid.uuid4().hex,
     }
     return jwt.encode(payload, SECRET_KEY, algorithm=JWT_ALGO)
 
 
-def decode_token(token: str) -> dict:
+def decode_token(token: str) -> dict[str, Any]:
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[JWT_ALGO])
     except jwt.ExpiredSignatureError:
@@ -102,17 +58,16 @@ def decode_token(token: str) -> dict:
         raise HTTPException(status_code=401, detail="Jeton invalide.")
 
 
-def get_current_user(authorization: str = Header(default=None)) -> dict:
-    """Dépendance FastAPI : extrait l'utilisateur depuis l'en-tête Authorization: Bearer <token>.
+def get_current_user(authorization: str = Header(default=None)) -> dict[str, Any]:
+    """Extrait l'utilisateur depuis Authorization: Bearer <token>.
 
-    Ne vérifie QUE la signature et l'expiration du jeton (via decode_token) —
-    pas la révocation, qui nécessite un accès à la base de données et est
-    donc appliquée par-dessus dans app.py (voir get_current_user là-bas, qui
-    enveloppe celle-ci). Ce module reste volontairement sans dépendance à
-    `database`, pour garder l'authentification "pure" testable isolément.
+    Ne vérifie QUE la signature et l'expiration — pas la révocation DB.
     """
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Non authentifié. Connecte-toi d'abord (commande: login).")
+        raise HTTPException(
+            status_code=401,
+            detail="Non authentifié. Connecte-toi d'abord (commande: login).",
+        )
     token = authorization.removeprefix("Bearer ").strip()
     payload = decode_token(token)
     return {

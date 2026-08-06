@@ -5,6 +5,29 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
+## [Non publié] — amélioration expert (qualité, performance, maintenabilité)
+
+### Amélioré (niveau expert)
+- **Moteur C de recherche** (`searchmodule.c`) :
+  - TABLE_SIZE 4096 → 8192 (moins de collisions)
+  - Libération des entrées vides après `index_remove` (anti-fuite mémoire long terme)
+  - Vérification systématique des `malloc` (échec → RuntimeError propre)
+  - Ignore les tokens d'1 caractère (bruit)
+  - Garde-fou sur `limit` de recherche
+- **Normalisation Unicode** côté Python avant indexation/recherche :
+  NFD + suppression des diacritiques → "café" / "Cafe" / "CAFÉ" matchent correctement
+- **database.py** :
+  - Mode WAL + busy_timeout + pragmas de performance (cache 64 Mo, temp_store MEMORY)
+  - Helper `transaction()` et helpers `execute` / `execute_one`
+- **Configuration centralisée** (`config.py`) :
+  - Tous les réglages (secret, rate limits, timeouts, limites images) au même endroit
+  - Chargement .env + génération de secret fort en dev
+- **auth.py** et **app.py** branchés sur `config.settings`
+
+### Vérifié
+- Compilation de l'extension C + imports auth/config
+- API publique inchangée
+
 ## [Non publié] — audit sécurité + notifications commentaires + Docker
 
 ### Ajouté

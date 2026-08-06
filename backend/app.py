@@ -31,6 +31,7 @@ from auth import hash_password, verify_password, create_token, decode_token
 from auth import get_current_user as _decode_and_verify_signature
 from realtime import manager
 from ratelimit import rate_limit
+from config import settings
 
 try:
     import searchengine
@@ -39,6 +40,22 @@ except ImportError:
         "Le module 'searchengine' (extension C) est introuvable. "
         "Compile-le avec : cd c_ext && python3 setup.py build_ext --inplace"
     )
+
+import unicodedata
+
+def _normalize_for_search(text: str) -> str:
+    """Normalise le texte avant indexation/recherche C.
+
+    - NFD + suppression des diacritiques → "café" devient "cafe"
+    - lower()
+    Cela permet au moteur C (ASCII-centric) de matcher correctement les
+    mots accentués français sans complexifier le code C avec UTF-8 multi-octet.
+    """
+    if not text:
+        return ""
+    nfkd = unicodedata.normalize("NFD", text)
+    without_accents = "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
+    return without_accents.lower()
 
 
 def get_current_user(authorization: str = Header(default=None)) -> dict:
@@ -106,7 +123,7 @@ async def lifespan(app: FastAPI):
     searchengine.clear()
     with get_conn() as conn:
         for row in conn.execute("SELECT id, content FROM posts"):
-            searchengine.index_add(row["id"], row["content"])
+            searchengine.index_add(row["id"], _normalize_for_search(row["content"]))
     yield
 
 
@@ -166,15 +183,13 @@ ALLOWED_IMAGE_TYPES = {
     "image/gif": (".gif", "GIF"),
     "image/webp": (".webp", "WEBP"),
 }
-MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 Mo
-MAX_IMAGE_DIMENSION = 4096  # largeur ou hauteur max (px) — protège contre les bombes de décompression
+MAX_IMAGE_SIZE = settings.max_image_size
+MAX_IMAGE_DIMENSION = settings.max_image_dimension
 UPLOAD_CHUNK_SIZE = 64 * 1024  # taille des blocs lus depuis le flux réseau
 
 # Délai laissé au client pour envoyer son message d'authentification une
-# fois le WebSocket accepté (voir websocket_endpoint). Assez court pour ne
-# pas laisser une connexion non authentifiée traîner indéfiniment, assez
-# long pour tolérer une connexion réseau lente.
-AUTH_TIMEOUT_SECONDS = 5
+# fois le WebSocket accepté (voir websocket_endpoint).
+AUTH_TIMEOUT_SECONDS = settings.auth_timeout_seconds
 
 
 async def _read_upload_with_limit(upload: UploadFile, max_size: int) -> bytes:
@@ -383,7 +398,7 @@ class MessageIn(BaseModel):
 
 # ---------- Auth ----------
 
-@app.post("/api/register", dependencies=[Depends(rate_limit(5, 60))])
+@app.post("/api/register", dependencies=[Depends(rate_limit(*settings.rate_limit_register))])
 def register(body: RegisterIn):
     """Crée un nouveau compte utilisateur et renvoie directement un jeton de
     session (l'utilisateur est connecté automatiquement après inscription).
@@ -408,7 +423,7 @@ def register(body: RegisterIn):
     return {"token": token, "username": body.username}
 
 
-@app.post("/api/login", dependencies=[Depends(rate_limit(10, 60))])
+@app.post("/api/login", dependencies=[Depends(rate_limit(*settings.rate_limit_login))])
 def login(body: LoginIn):
     """Vérifie les identifiants et renvoie un jeton JWT valable 7 jours.
 
@@ -744,7 +759,7 @@ async def create_post(
         )
         conn.commit()
         post_id = cur.lastrowid
-        searchengine.index_add(post_id, content)
+        searchengine.index_add(post_id, _normalize_for_search(content))
         _index_hashtags(conn, post_id, content)
         conn.commit()
         row = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
@@ -935,8 +950,8 @@ async def edit_post(post_id: int, body: PostEditIn, user=Depends(get_current_use
 
         conn.execute("UPDATE posts SET content = ? WHERE id = ?", (body.content, post_id))
         conn.commit()
-        searchengine.index_remove(post_id, row["content"])
-        searchengine.index_add(post_id, body.content)
+        searchengine.index_remove(post_id, _normalize_for_search(row["content"]))
+        searchengine.index_add(post_id, _normalize_for_search(body.content))
         _deindex_hashtags(conn, post_id)
         _index_hashtags(conn, post_id, body.content)
         conn.commit()
@@ -981,7 +996,7 @@ def delete_post(post_id: int, user=Depends(get_current_user)):
         conn.execute("DELETE FROM posts WHERE id = ?", (post_id,))
         conn.commit()
 
-    searchengine.index_remove(post_id, row["content"])
+    searchengine.index_remove(post_id, _normalize_for_search(row["content"]))
 
     image_path = row["image_path"] if "image_path" in row.keys() else None
     if image_path:
@@ -1261,7 +1276,7 @@ def search(q: str, limit: int = 20, offset: int = 0, user=Depends(get_current_us
     limit = max(1, min(limit, 50))
     offset = max(0, offset)
 
-    raw_results = searchengine.search(q, offset + limit + 1)
+    raw_results = searchengine.search(_normalize_for_search(q), offset + limit + 1)
     has_more = len(raw_results) > offset + limit
     page = raw_results[offset:offset + limit]
 
