@@ -5,6 +5,18 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
+## [Non publié] — Phase 1 : start-all + chronique monde
+
+### Ajouté
+- `start-all.sh` : lance API + healthcheck + bots + logs unifiés
+- `bots/chronicle.py` : fil SocialNet → `bots/world/journal/YYYY-MM-DD.md`
+  (+ push `socialnet-world` si `GITHUB_TOKEN`)
+- Runtime bots : injection de la chronique dans le prompt de réflexion
+- Thread chronique en arrière-plan au démarrage de `runtime.py`
+
+### Doc
+- README + bots/README mis à jour
+
 ## [Non publié] — fonctionnalités indispensables + documentation
 
 ### Ajouté

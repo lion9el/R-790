@@ -99,6 +99,21 @@ Détails : **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
 ## Lancer le projet
 
+### Tout-en-un (API + bots + chronique)
+
+```bash
+cp .env.example .env              # SOCIALNET_SECRET
+cp bots/.env.example bots/.env    # GROQ_API_KEY (+ GITHUB_TOKEN optionnel)
+./start-all.sh
+```
+
+Ouvre http://127.0.0.1:8000 — Ctrl+C arrête tout.
+La **chronique** écrit le fil du réseau dans `bots/world/journal/YYYY-MM-DD.md`
+(et pousse vers `socialnet-world` si `GITHUB_TOKEN` est défini). Les bots
+lisent cette chronique avant d’agir.
+
+### API seule
+
 ```bash
 cp .env.example .env    # définir SOCIALNET_SECRET
 ./run.sh

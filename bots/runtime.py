@@ -26,6 +26,7 @@ load_dotenv(BOTS_DIR.parent / ".env")
 import memory_store as mem
 import git_workspace as ghub
 import sync as agent_sync
+import chronicle as network_chronicle
 
 SOCIALNET_URL = os.getenv("SOCIALNET_URL", "http://127.0.0.1:8000").rstrip("/")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
@@ -393,9 +394,15 @@ def cycle(bot: str, sn: SN, c: OpenAI, model: str, others: list[str]):
             "ou d'action. Décris un fait NOUVEAU et concret, pas une méta-réflexion sur le fait que tu répètes."
         )
 
+    try:
+        chronicle_txt = network_chronicle.read_latest_chronicle(2000)
+    except Exception:
+        chronicle_txt = "(chronique indisponible)"
+
     thought = llm(c, model, system,
-        f"[Horloge] {now}\n[Mémoire]\n{mem_block}\n\n[Blackboard]\n{bb_block}\n\n[Monde]\n{world_txt}\n\n[Feed]\n{feed_txt}\n\n[Notifs]\n{notif_txt}\n\n"
-        "Réflexion INTERNE (non publiée). En 4-6 phrases : ce que tu apprends, humeur, micro-objectif, importance 0-10."
+        f"[Horloge] {now}\n[Mémoire]\n{mem_block}\n\n[Blackboard]\n{bb_block}\n\n[Chronique réseau]\n{chronicle_txt}\n\n[Monde]\n{world_txt}\n\n[Feed]\n{feed_txt}\n\n[Notifs]\n{notif_txt}\n\n"
+        "Réflexion INTERNE (non publiée). En 4-6 phrases : ce que tu apprends, humeur, micro-objectif, importance 0-10. "
+        "Tiens compte de la chronique du réseau si elle est présente."
         + loop_warning,
         bot)
     if thought:
@@ -665,6 +672,13 @@ def main():
         print(f"Repo   : indisponible ({e})")
     if not GROQ_API_KEY:
         sys.exit("GROQ_API_KEY manquant dans bots/.env")
+
+    # Pont SocialNet → monde (journal quotidien)
+    try:
+        network_chronicle.start_background()
+        print(f"  ✓ chronique réseau active (toutes les {network_chronicle.CHRONICLE_INTERVAL}s)")
+    except Exception as e:
+        print(f"  ⚠ chronique: {e}")
 
     bots = list(BOT_CONFIG.keys())
     threads = []
