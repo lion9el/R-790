@@ -381,6 +381,22 @@ const COMMANDS = {
     print("  search <mots>                rechercher des posts (moteur C)");
     print("  hashtag <tag>                voir les posts contenant #tag");
     print("  trending                     hashtags les plus utilisés");
+    print("  --- compte & sécurité ---", "dim");
+    print("  passwd <ancien> <nouveau>    changer de mot de passe");
+    print("  reset-request <user>         demander un jeton de reset mdp");
+    print("  reset-confirm <token> <mdp>  réinitialiser le mdp");
+    print("  delete-account <mdp>         supprimer définitivement son compte");
+    print("  export                       exporter ses données (RGPD)");
+    print("  setname <nom>                nom d'affichage");
+    print("  privacy on|off               compte privé / public");
+    print("  --- modération ---", "dim");
+    print("  block <user>                 bloquer un utilisateur");
+    print("  unblock <user>               débloquer");
+    print("  blocks                       liste des bloqués");
+    print("  report post|user|comment <id> <raison>");
+    print("  bookmark <id> / unbookmark <id> / bookmarks");
+    print("  requests                     demandes de follow (compte privé)");
+    print("  accept <user> / reject <user>");
     print("  clear                        vider l'écran");
   },
 
@@ -447,6 +463,149 @@ const COMMANDS = {
   whoami() {
     print(username ? `@${username}` : "non connecté");
   },
+
+  async passwd(args) {
+    if (!requireAuth()) return;
+    const [cur, neu] = args;
+    if (!cur || !neu) return print("usage: passwd <ancien> <nouveau>", "err");
+    await api("POST", "/api/account/change-password", { current_password: cur, new_password: neu });
+    print("Mot de passe changé. Reconnecte-toi.");
+    intentionalDisconnect = true;
+    token = null; username = null;
+    localStorage.removeItem("sn_token"); localStorage.removeItem("sn_username");
+    disconnectRealtime(); updateHeader();
+  },
+
+  async "reset-request"(args) {
+    const [user] = args;
+    if (!user) return print("usage: reset-request <user>", "err");
+    const data = await api("POST", "/api/account/reset-request", { username: user }, false);
+    print(data.detail || "ok");
+    if (data.token) print(`Jeton (demo) : ${data.token}`, "dim");
+  },
+
+  async "reset-confirm"(args) {
+    const [tok, neu] = args;
+    if (!tok || !neu) return print("usage: reset-confirm <token> <nouveau_mdp>", "err");
+    await api("POST", "/api/account/reset-confirm", { token: tok, new_password: neu }, false);
+    print("Mot de passe réinitialisé. Connecte-toi avec login.");
+  },
+
+  async "delete-account"(args) {
+    if (!requireAuth()) return;
+    const [pass] = args;
+    if (!pass) return print("usage: delete-account <mdp>", "err");
+    await api("POST", "/api/account/delete", { password: pass });
+    intentionalDisconnect = true;
+    token = null; username = null;
+    localStorage.removeItem("sn_token"); localStorage.removeItem("sn_username");
+    disconnectRealtime(); updateHeader();
+    print("Compte supprimé définitivement.");
+  },
+
+  async export() {
+    if (!requireAuth()) return;
+    const data = await api("GET", "/api/account/export");
+    print(JSON.stringify(data, null, 2));
+  },
+
+  async setname(args) {
+    if (!requireAuth()) return;
+    const name = args.join(" ");
+    const fd = new FormData();
+    fd.append("display_name", name);
+    const data = await apiForm("PATCH", "/api/me/profile", fd);
+    print(`Nom d'affichage : ${data.display_name || "(vide)"}`);
+  },
+
+  async privacy(args) {
+    if (!requireAuth()) return;
+    const v = (args[0] || "").toLowerCase();
+    if (v !== "on" && v !== "off") return print("usage: privacy on|off", "err");
+    const fd = new FormData();
+    fd.append("is_private", v === "on" ? "true" : "false");
+    const data = await apiForm("PATCH", "/api/me/profile", fd);
+    print(data.is_private ? "Compte privé activé." : "Compte public.");
+  },
+
+  async block(args) {
+    if (!requireAuth()) return;
+    const [u] = args;
+    if (!u) return print("usage: block <user>", "err");
+    await api("POST", `/api/block/${encodeURIComponent(u)}`);
+    print(`@${u} bloqué.`);
+  },
+
+  async unblock(args) {
+    if (!requireAuth()) return;
+    const [u] = args;
+    if (!u) return print("usage: unblock <user>", "err");
+    await api("DELETE", `/api/block/${encodeURIComponent(u)}`);
+    print(`@${u} débloqué.`);
+  },
+
+  async blocks() {
+    if (!requireAuth()) return;
+    const list = await api("GET", "/api/blocks");
+    if (!list.length) return print("Aucun utilisateur bloqué.", "dim");
+    list.forEach(b => print(`@${b.username} (depuis ${b.blocked_at})`));
+  },
+
+  async report(args) {
+    if (!requireAuth()) return;
+    const [typ, id, ...rest] = args;
+    const reason = rest.join(" ");
+    if (!typ || !id || !reason) return print("usage: report post|user|comment <id> <raison>", "err");
+    await api("POST", "/api/report", { target_type: typ, target_id: parseInt(id, 10), reason });
+    print("Signalement enregistré. Merci.");
+  },
+
+  async bookmark(args) {
+    if (!requireAuth()) return;
+    const [id] = args;
+    if (!id) return print("usage: bookmark <id>", "err");
+    await api("POST", `/api/posts/${id}/bookmark`);
+    print(`Post #${id} sauvegardé.`);
+  },
+
+  async unbookmark(args) {
+    if (!requireAuth()) return;
+    const [id] = args;
+    if (!id) return print("usage: unbookmark <id>", "err");
+    await api("DELETE", `/api/posts/${id}/bookmark`);
+    print(`Post #${id} retiré des favoris.`);
+  },
+
+  async bookmarks() {
+    if (!requireAuth()) return;
+    const list = await api("GET", "/api/bookmarks");
+    if (!list.length) return print("Aucun favori.", "dim");
+    list.forEach(p => printHTML(fmtPost(p)));
+  },
+
+  async requests() {
+    if (!requireAuth()) return;
+    const list = await api("GET", "/api/follow-requests");
+    if (!list.length) return print("Aucune demande en attente.", "dim");
+    list.forEach(r => print(`@${r.username} (demandé ${r.requested_at})`));
+  },
+
+  async accept(args) {
+    if (!requireAuth()) return;
+    const [u] = args;
+    if (!u) return print("usage: accept <user>", "err");
+    await api("POST", `/api/follow-requests/${encodeURIComponent(u)}/accept`);
+    print(`Demande de @${u} acceptée.`);
+  },
+
+  async reject(args) {
+    if (!requireAuth()) return;
+    const [u] = args;
+    if (!u) return print("usage: reject <user>", "err");
+    await api("POST", `/api/follow-requests/${encodeURIComponent(u)}/reject`);
+    print(`Demande de @${u} refusée.`);
+  },
+
 
   async post(args) {
     if (!requireAuth()) return;

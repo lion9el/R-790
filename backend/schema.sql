@@ -4,13 +4,11 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     salt TEXT NOT NULL,
     bio TEXT DEFAULT '',
+    display_name TEXT,
+    avatar_path TEXT,
+    is_private INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    -- Horodatage Unix en MILLISECONDES (pas en secondes, pour éviter des
-    -- collisions entre deux jetons émis pendant la même seconde) : tout
-    -- jeton émis avant cette date (comparé à son claim JWT "iat_ms") est
-    -- considéré révoqué ("déconnexion de tous les appareils"). NULL = pas
-    -- de révocation globale en cours. Ajoutée après la v1.0 pour les bases
-    -- déjà créées ; voir database.py::_apply_migrations.
+    -- Horodatage Unix en MILLISECONDES : révocation globale des jetons.
     tokens_valid_after INTEGER
 );
 
@@ -130,3 +128,77 @@ CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(sender_id, receiver_id)
 -- sert que si la première colonne est filtrée).
 CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower_id);
 CREATE INDEX IF NOT EXISTS idx_likes_user ON likes(user_id);
+
+-- ========== Extensions indispensables (v2) ==========
+
+-- Profil enrichi
+-- display_name, avatar_path, is_private ajoutés via migrations pour bases existantes
+
+CREATE TABLE IF NOT EXISTS blocks (
+    blocker_id INTEGER NOT NULL,
+    blocked_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (blocker_id, blocked_id),
+    FOREIGN KEY (blocker_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (blocked_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks(blocked_id);
+
+CREATE TABLE IF NOT EXISTS reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reporter_id INTEGER NOT NULL,
+    -- 'user' | 'post' | 'comment'
+    target_type TEXT NOT NULL,
+    target_id INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    -- 'open' | 'reviewed' | 'dismissed'
+    status TEXT NOT NULL DEFAULT 'open',
+    FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status);
+
+CREATE TABLE IF NOT EXISTS bookmarks (
+    user_id INTEGER NOT NULL,
+    post_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, post_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_bookmarks_user ON bookmarks(user_id);
+
+-- Demandes de follow pour comptes privés
+CREATE TABLE IF NOT EXISTS follow_requests (
+    requester_id INTEGER NOT NULL,
+    target_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    -- 'pending' | 'accepted' | 'rejected'
+    status TEXT NOT NULL DEFAULT 'pending',
+    PRIMARY KEY (requester_id, target_id),
+    FOREIGN KEY (requester_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (target_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_follow_requests_target ON follow_requests(target_id, status);
+
+-- Tokens de réinitialisation de mot de passe (usage unique, courte durée)
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    used_at TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_tokens(user_id);
+
+-- Refresh tokens (sessions longue durée, révocables)
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    jti TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    revoked_at TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);

@@ -47,8 +47,16 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
 
     users_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
     if "tokens_valid_after" not in users_columns:
-        # Horodatage Unix en MILLISECONDES (entier) : comparé au claim JWT "iat_ms".
         conn.execute("ALTER TABLE users ADD COLUMN tokens_valid_after INTEGER")
+        conn.commit()
+    if "display_name" not in users_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN display_name TEXT")
+        conn.commit()
+    if "avatar_path" not in users_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN avatar_path TEXT")
+        conn.commit()
+    if "is_private" not in users_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0")
         conn.commit()
 
 

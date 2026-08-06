@@ -45,6 +45,9 @@ from services.common import (
     serialize_post as _serialize_post,
 )
 from services.images import save_uploaded_image as _save_uploaded_image, UPLOAD_DIR
+from services import account as account_service
+from services import moderation as moderation_service
+from schemas import RegisterIn, LoginIn, ProfileIn, PostEditIn, CommentIn, MessageIn
 
 try:
     import searchengine
@@ -823,33 +826,9 @@ def delete_comment(comment_id: int, user=Depends(get_current_user)):
 
 @app.post("/api/follow/{username}")
 async def follow_user(username: str, user=Depends(get_current_user)):
-    """Fait suivre `username` par l'utilisateur courant.
-
-    Refuse de se suivre soi-même (400). Idempotent comme les likes : suivre
-    deux fois quelqu'un ne provoque pas d'erreur ni de notification en double.
-    """
-    with get_conn() as conn:
-        target = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
-        if not target:
-            raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
-        if target["id"] == user["id"]:
-            raise HTTPException(status_code=400, detail="Tu ne peux pas te suivre toi-même.")
-        already_following = conn.execute(
-            "SELECT 1 FROM follows WHERE follower_id = ? AND followed_id = ?", (user["id"], target["id"])
-        ).fetchone() is not None
-        if already_following:
-            return {"ok": True}
-
-        conn.execute(
-            "INSERT OR IGNORE INTO follows (follower_id, followed_id, created_at) VALUES (?, ?, ?)",
-            (user["id"], target["id"], now()),
-        )
-        conn.commit()
-        notification = _create_notification(conn, target["id"], "follow", user["username"])
-        target_id = target["id"]
-
-    await manager.send_to_user(target_id, {"type": "notification", "notification": notification})
-    return {"ok": True}
+    """Follow direct ou demande si compte privé. Respecte les blocages."""
+    result = moderation_service.request_follow(user["id"], username)
+    return result
 
 
 @app.delete("/api/follow/{username}")
@@ -868,21 +847,43 @@ def unfollow_user(username: str, user=Depends(get_current_user)):
 
 @app.get("/api/users/{username}")
 def get_user_profile(username: str, user=Depends(get_current_user)):
-    """Profil public d'un utilisateur : bio + compteurs (posts, followers,
-    abonnements). Ne renvoie jamais le mot de passe ni son hash."""
+    """Profil public enrichi. Respecte blocages et comptes privés."""
     with get_conn() as conn:
-        row = conn.execute("SELECT id, username, bio, created_at FROM users WHERE username = ?", (username,)).fetchone()
+        row = conn.execute(
+            "SELECT id, username, display_name, bio, avatar_path, is_private, created_at FROM users WHERE username = ? COLLATE NOCASE",
+            (username,),
+        ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+        if moderation_service.is_blocked(conn, user["id"], row["id"]):
+            raise HTTPException(status_code=403, detail="Profil inaccessible (blocage).")
+        is_private = bool(row["is_private"]) if row["is_private"] is not None else False
+        is_self = row["id"] == user["id"]
+        is_follower = conn.execute(
+            "SELECT 1 FROM follows WHERE follower_id = ? AND followed_id = ?",
+            (user["id"], row["id"]),
+        ).fetchone() is not None
+        if is_private and not is_self and not is_follower:
+            return {
+                "username": row["username"],
+                "display_name": row["display_name"],
+                "is_private": True,
+                "avatar_url": f"/uploads/{row['avatar_path']}" if row["avatar_path"] else None,
+                "detail": "Compte privé — demande un abonnement pour voir le contenu.",
+            }
         followers = conn.execute("SELECT COUNT(*) c FROM follows WHERE followed_id = ?", (row["id"],)).fetchone()["c"]
         following = conn.execute("SELECT COUNT(*) c FROM follows WHERE follower_id = ?", (row["id"],)).fetchone()["c"]
         post_count = conn.execute("SELECT COUNT(*) c FROM posts WHERE user_id = ?", (row["id"],)).fetchone()["c"]
         return {
             "username": row["username"],
-            "bio": row["bio"],
+            "display_name": row["display_name"],
+            "bio": row["bio"] or "",
+            "avatar_url": f"/uploads/{row['avatar_path']}" if row["avatar_path"] else None,
+            "is_private": is_private,
             "followers": followers,
             "following": following,
             "posts": post_count,
+            "created_at": row["created_at"],
         }
 
 
@@ -906,6 +907,8 @@ async def send_message(body: MessageIn, user=Depends(get_current_user)):
         target = conn.execute("SELECT id FROM users WHERE username = ?", (body.to,)).fetchone()
         if not target:
             raise HTTPException(status_code=404, detail="Destinataire introuvable.")
+        if moderation_service.is_blocked(conn, user["id"], target["id"]):
+            raise HTTPException(status_code=403, detail="Impossible d'envoyer un message (blocage).")
         conn.execute(
             "INSERT INTO messages (sender_id, receiver_id, content, created_at) VALUES (?, ?, ?, ?)",
             (user["id"], target["id"], body.content, sent_at),
@@ -1016,6 +1019,154 @@ def search(q: str, limit: int = 20, offset: int = 0, user=Depends(get_current_us
             "has_more": has_more,
             "next_offset": offset + limit if has_more else None,
         }
+
+
+
+# ---------- Compte : mot de passe, suppression, profil, export ----------
+
+class ChangePasswordIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=100)
+    new_password: str = Field(min_length=6, max_length=100)
+
+
+class ResetRequestIn(BaseModel):
+    username: str
+
+
+class ResetConfirmIn(BaseModel):
+    token: str
+    new_password: str = Field(min_length=6, max_length=100)
+
+
+class DeleteAccountIn(BaseModel):
+    password: str
+
+
+class ReportIn(BaseModel):
+    target_type: str  # user | post | comment
+    target_id: int
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class ProfileUpdateIn(BaseModel):
+    bio: str | None = Field(default=None, max_length=200)
+    display_name: str | None = Field(default=None, max_length=50)
+    is_private: bool | None = None
+
+
+@app.post("/api/account/change-password")
+def change_password(body: ChangePasswordIn, user=Depends(get_current_user)):
+    account_service.change_password(user["id"], body.current_password, body.new_password)
+    return {"ok": True, "detail": "Mot de passe changé. Reconnecte-toi."}
+
+
+@app.post("/api/account/reset-request", dependencies=[Depends(rate_limit(3, 300))])
+def reset_request(body: ResetRequestIn):
+    token = account_service.request_password_reset(body.username)
+    # En prod : envoyer par email. Ici on renvoie le token pour le terminal demo.
+    if token is None:
+        return {"ok": True, "detail": "Si le compte existe, un jeton a été créé."}
+    return {"ok": True, "token": token, "detail": "Jeton valable 1h (demo : affiché ici au lieu d'un email)."}
+
+
+@app.post("/api/account/reset-confirm", dependencies=[Depends(rate_limit(5, 300))])
+def reset_confirm(body: ResetConfirmIn):
+    account_service.reset_password(body.token, body.new_password)
+    return {"ok": True, "detail": "Mot de passe réinitialisé. Connecte-toi."}
+
+
+@app.post("/api/account/delete")
+def delete_account(body: DeleteAccountIn, user=Depends(get_current_user)):
+    account_service.delete_account(user["id"], body.password)
+    return {"ok": True, "detail": "Compte supprimé définitivement."}
+
+
+@app.get("/api/account/export")
+def export_account(user=Depends(get_current_user)):
+    return account_service.export_user_data(user["id"])
+
+
+@app.patch("/api/me/profile")
+async def update_full_profile(
+    bio: str | None = Form(None),
+    display_name: str | None = Form(None),
+    is_private: bool | None = Form(None),
+    avatar: UploadFile | None = File(None),
+    user=Depends(get_current_user),
+):
+    avatar_path = None
+    if avatar is not None and avatar.filename:
+        avatar_path = await _save_uploaded_image(avatar)
+    return account_service.update_profile_fields(
+        user["id"], bio=bio, display_name=display_name, is_private=is_private, avatar_path=avatar_path
+    )
+
+
+# ---------- Modération : blocage, signalement, bookmarks, follow privé ----------
+
+@app.post("/api/block/{username}")
+def block_user(username: str, user=Depends(get_current_user)):
+    moderation_service.block_user(user["id"], username)
+    return {"ok": True}
+
+
+@app.delete("/api/block/{username}")
+def unblock_user(username: str, user=Depends(get_current_user)):
+    moderation_service.unblock_user(user["id"], username)
+    return {"ok": True}
+
+
+@app.get("/api/blocks")
+def list_blocks(user=Depends(get_current_user)):
+    return moderation_service.list_blocked(user["id"])
+
+
+@app.post("/api/report")
+def report(body: ReportIn, user=Depends(get_current_user)):
+    return moderation_service.report_content(user["id"], body.target_type, body.target_id, body.reason)
+
+
+@app.post("/api/posts/{post_id}/bookmark")
+def bookmark(post_id: int, user=Depends(get_current_user)):
+    moderation_service.bookmark_post(user["id"], post_id)
+    return {"ok": True}
+
+
+@app.delete("/api/posts/{post_id}/bookmark")
+def unbookmark(post_id: int, user=Depends(get_current_user)):
+    moderation_service.unbookmark_post(user["id"], post_id)
+    return {"ok": True}
+
+
+@app.get("/api/bookmarks")
+def bookmarks(limit: int = 30, user=Depends(get_current_user)):
+    from database import get_conn
+    ids = moderation_service.list_bookmarks(user["id"], limit)
+    if not ids:
+        return []
+    with get_conn() as conn:
+        placeholders = ",".join("?" * len(ids))
+        rows = conn.execute(f"SELECT * FROM posts WHERE id IN ({placeholders})", ids).fetchall()
+        by_id = {r["id"]: r for r in rows}
+        ordered = [by_id[i] for i in ids if i in by_id]
+        return _serialize_posts(conn, ordered, user["id"])
+
+
+@app.post("/api/follow-requests/{username}/accept")
+def accept_follow(username: str, user=Depends(get_current_user)):
+    moderation_service.respond_follow_request(user["id"], username, accept=True)
+    return {"ok": True}
+
+
+@app.post("/api/follow-requests/{username}/reject")
+def reject_follow(username: str, user=Depends(get_current_user)):
+    moderation_service.respond_follow_request(user["id"], username, accept=False)
+    return {"ok": True}
+
+
+@app.get("/api/follow-requests")
+def list_follow_requests(user=Depends(get_current_user)):
+    return moderation_service.list_follow_requests(user["id"])
 
 
 # ---------- Frontend statique (interface terminal) ----------
