@@ -1017,10 +1017,13 @@ def search(q: str, limit: int = 20, offset: int = 0, user=Depends(get_current_us
         out = []
         for doc_id, score in page:
             row = conn.execute("SELECT * FROM posts WHERE id = ?", (doc_id,)).fetchone()
-            if row:
-                serialized = _serialize_post(conn, row, user["id"])
-                serialized["score"] = score
-                out.append(serialized)
+            if not row:
+                continue
+            if moderation_service.is_blocked(conn, user["id"], row["user_id"]):
+                continue
+            serialized = _serialize_post(conn, row, user["id"])
+            serialized["score"] = score
+            out.append(serialized)
         return {
             "results": out,
             "has_more": has_more,
@@ -1097,15 +1100,18 @@ def export_account(user=Depends(get_current_user)):
 async def update_full_profile(
     bio: str | None = Form(None),
     display_name: str | None = Form(None),
-    is_private: bool | None = Form(None),
+    is_private: str | None = Form(None),  # "true"/"false" depuis FormData
     avatar: UploadFile | None = File(None),
     user=Depends(get_current_user),
 ):
     avatar_path = None
     if avatar is not None and avatar.filename:
         avatar_path = await _save_uploaded_image(avatar)
+    private_flag = None
+    if is_private is not None and str(is_private).strip() != "":
+        private_flag = str(is_private).strip().lower() in ("1", "true", "yes", "on")
     return account_service.update_profile_fields(
-        user["id"], bio=bio, display_name=display_name, is_private=is_private, avatar_path=avatar_path
+        user["id"], bio=bio, display_name=display_name, is_private=private_flag, avatar_path=avatar_path
     )
 
 

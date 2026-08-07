@@ -86,9 +86,6 @@ if [[ -f "$ROOT/bots/chronicle.py" ]]; then
 fi
 
 # bots (optionnel si pas de GROQ key)
-if [[ -f "$ROOT/bots/.env" ]] || grep -q "GROQ_API_KEY=.\+" "$ROOT/bots/.env" 2>/dev/null; then
-  :
-fi
 if [[ -f "$ROOT/bots/.env" ]] && grep -qE '^GROQ_API_KEY=.+' "$ROOT/bots/.env" 2>/dev/null; then
   echo "== Démarrage bots =="
   (

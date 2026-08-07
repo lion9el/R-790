@@ -14,6 +14,11 @@ from auth import hash_password, verify_password, create_token
 from database import get_conn
 from services.common import now
 
+try:
+    import searchengine
+except ImportError:
+    searchengine = None
+
 
 def change_password(user_id: int, current_password: str, new_password: str) -> None:
     if len(new_password) < 6:
@@ -112,6 +117,11 @@ def delete_account(user_id: int, password: str) -> None:
             conn.execute("DELETE FROM comments WHERE post_id = ?", (pid,))
             conn.execute("DELETE FROM bookmarks WHERE post_id = ?", (pid,))
             conn.execute("DELETE FROM notifications WHERE post_id = ?", (pid,))
+            if searchengine is not None:
+                try:
+                    searchengine.index_remove(pid)
+                except Exception:
+                    pass
         conn.execute("DELETE FROM posts WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
         conn.commit()

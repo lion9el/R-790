@@ -31,16 +31,37 @@ def _detect_engine() -> str:
 ENGINE = _detect_engine()
 
 
+# Tables avec colonne SERIAL `id` (RETURNING id sûr sous Postgres)
+_SERIAL_ID_TABLES = frozenset({
+    "users", "posts", "comments", "messages", "notifications", "reports",
+})
+
+
 def adapt_sql(sql: str, original: str | None = None) -> str:
     if ENGINE != "postgres":
         return sql
     orig = original or sql
     sql = sql.replace("?", "%s")
+    # INSERT OR IGNORE
     was_ignore = bool(re.search(r"INSERT\s+OR\s+IGNORE", orig, re.I))
     sql = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO", "INSERT INTO", sql, flags=re.I)
+    # INSERT OR REPLACE → upsert minimal
+    was_replace = bool(re.search(r"INSERT\s+OR\s+REPLACE", orig, re.I))
+    sql = re.sub(r"INSERT\s+OR\s+REPLACE\s+INTO", "INSERT INTO", sql, flags=re.I)
     sql = re.sub(r"\s+COLLATE\s+NOCASE", "", sql, flags=re.I)
     if was_ignore and "ON CONFLICT" not in sql.upper():
         sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+    elif was_replace and "ON CONFLICT" not in sql.upper():
+        # Upsert générique : nécessite une contrainte unique — DO UPDATE no-op sur xmin
+        sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+        # follow_requests : mieux en DO UPDATE status
+        if re.search(r"INTO\s+follow_requests", orig, re.I):
+            sql = re.sub(
+                r" ON CONFLICT DO NOTHING$",
+                " ON CONFLICT (requester_id, target_id) DO UPDATE SET "
+                "status = EXCLUDED.status, created_at = EXCLUDED.created_at",
+                sql,
+            )
     return sql
 
 
@@ -69,7 +90,14 @@ class _PgCursor:
         original = sql
         sql = adapt_sql(sql, original)
         is_insert = bool(re.match(r"\s*INSERT\s+", original, re.I))
-        wants_id = is_insert and "ON CONFLICT" not in sql.upper() and "RETURNING" not in sql.upper()
+        table_m = re.search(r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+(\w+)", original, re.I)
+        table = (table_m.group(1).lower() if table_m else "")
+        wants_id = (
+            is_insert
+            and table in _SERIAL_ID_TABLES
+            and "ON CONFLICT" not in sql.upper()
+            and "RETURNING" not in sql.upper()
+        )
         if wants_id:
             sql = sql.rstrip().rstrip(";") + " RETURNING id"
         self._cur.execute(sql, params if params else None)

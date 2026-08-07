@@ -138,8 +138,13 @@ def request_follow(requester_id: int, target_username: str) -> dict[str, Any]:
 
         is_private = bool(target["is_private"]) if target["is_private"] is not None else False
         if is_private:
+            # Portable : delete + insert (évite INSERT OR REPLACE non-PG)
             conn.execute(
-                "INSERT OR REPLACE INTO follow_requests (requester_id, target_id, created_at, status) "
+                "DELETE FROM follow_requests WHERE requester_id = ? AND target_id = ?",
+                (requester_id, target["id"]),
+            )
+            conn.execute(
+                "INSERT INTO follow_requests (requester_id, target_id, created_at, status) "
                 "VALUES (?, ?, ?, 'pending')",
                 (requester_id, target["id"], now()),
             )
