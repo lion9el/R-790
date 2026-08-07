@@ -321,6 +321,12 @@ def _make_sensitive_tools(requested_by: int):
 # ---------------------------------------------------------------------------
 
 def confirm_action(action_id: int, admin_id: int) -> dict[str, Any]:
+    """Exécute une action 'pending'. Si l'exécution produit une notification
+    à pousser en temps réel (ex: warn_user), l'info est renvoyée sous la clé
+    "_push" du dict retourné — jamais persistée en DB — pour que l'appelant
+    (route FastAPI, async) puisse faire le `await manager.send_to_user(...)`,
+    ce que cette fonction ne peut pas faire elle-même (elle est synchrone,
+    comme le reste de l'accès DB dans ce module)."""
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM agent_actions WHERE id = ?", (action_id,)).fetchone()
         if not row:
@@ -336,13 +342,25 @@ def confirm_action(action_id: int, admin_id: int) -> dict[str, Any]:
         except HTTPException as e:
             result = {"error": e.detail}
             status = "failed"
+        except Exception as e:  # noqa: BLE001 - filet de sécurité volontaire :
+            # une erreur inattendue pendant l'exécution (contrainte DB,
+            # bug futur...) ne doit jamais faire planter la route en 500 ni
+            # laisser l'action bloquée en 'pending' : elle est marquée
+            # 'failed' avec le détail, un admin peut retenter ou investiguer.
+            result = {"error": f"{type(e).__name__}: {e}"}
+            status = "failed"
+
+        push = result.pop("_push", None)
 
         conn.execute(
             "UPDATE agent_actions SET status = ?, reviewed_by = ?, reviewed_at = ?, result = ? WHERE id = ?",
             (status, admin_id, now(), json.dumps(result), action_id),
         )
         conn.commit()
-        return {"id": action_id, "status": status, "result": result}
+        out = {"id": action_id, "status": status, "result": result}
+        if push:
+            out["_push"] = push
+        return out
 
 
 def reject_action(action_id: int, admin_id: int) -> dict[str, Any]:
@@ -381,17 +399,35 @@ def _execute(action_type: str, payload: dict[str, Any], reason: str | None = Non
     with get_conn() as conn:
         if action_type == "delete_post":
             post_id = payload["post_id"]
-            row = conn.execute("SELECT content FROM posts WHERE id = ?", (post_id,)).fetchone()
+            row = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="Post déjà supprimé.")
+            # Miroir exact de DELETE /api/posts/{id} (app.py) : les FK vers
+            # posts(id) n'ont pas de ON DELETE CASCADE, donc l'ordre compte
+            # et rien ne doit être oublié sous peine de FOREIGN KEY constraint
+            # (likes/comments/notifications avant le post lui-même).
+            from services.common import deindex_hashtags, normalize_for_search
+
+            conn.execute("DELETE FROM likes WHERE post_id = ?", (post_id,))
+            conn.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
+            conn.execute("DELETE FROM notifications WHERE post_id = ?", (post_id,))
+            deindex_hashtags(conn, post_id)
             conn.execute("DELETE FROM posts WHERE id = ?", (post_id,))
             conn.commit()
+
             try:
                 import searchengine
-                from services.common import normalize_for_search
                 searchengine.index_remove(post_id, normalize_for_search(row["content"]))
             except ImportError:
                 pass
+
+            image_path = row["image_path"] if "image_path" in row.keys() else None
+            if image_path:
+                from services.images import UPLOAD_DIR
+                try:
+                    os.remove(os.path.join(UPLOAD_DIR, image_path))
+                except FileNotFoundError:
+                    pass
             return {"deleted_post_id": post_id}
 
         if action_type == "delete_comment":
@@ -453,8 +489,12 @@ def _execute(action_type: str, payload: dict[str, Any], reason: str | None = Non
             if not row:
                 raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
             from services.common import create_notification
-            create_notification(conn, user_id, "admin_warning", "admin", content=payload["message"])
-            return {"warned_user_id": user_id}
+            notification = create_notification(conn, user_id, "admin_warning", "admin", content=payload["message"])
+            # Poussée en websocket gérée par l'appelant (confirm_action), pas
+            # ici : cette fonction est synchrone et `manager.send_to_user` est
+            # une coroutine. On renvoie l'info nécessaire via une clé privée,
+            # retirée avant persistance en DB (voir confirm_action).
+            return {"warned_user_id": user_id, "_push": {"user_id": user_id, "notification": notification}}
 
         raise HTTPException(status_code=400, detail=f"Type d'action inconnu : {action_type}")
 

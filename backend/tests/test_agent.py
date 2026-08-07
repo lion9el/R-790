@@ -85,6 +85,39 @@ def test_propose_and_confirm_delete_post(client):
     assert r6.status_code == 400
 
 
+def test_propose_and_confirm_delete_post_with_likes_and_comments(client):
+    """Régression : la première version de _execute("delete_post") ne
+    nettoyait pas likes/comments/notifications avant de supprimer le post,
+    ce qui plantait avec une erreur FOREIGN KEY constraint dès qu'un post
+    avait la moindre interaction. Ce test couvre précisément ce cas."""
+    tok = _reg(client, "mona_agent")
+    _make_admin("mona_agent")
+    tok_other = _reg(client, "nina_other")
+
+    r = client.post("/api/posts", data={"content": "post populaire"}, headers=_auth(tok))
+    post_id = r.json()["id"]
+
+    # Une interaction d'un autre utilisateur : like + commentaire
+    assert client.post(f"/api/posts/{post_id}/like", headers=_auth(tok_other)).status_code == 200
+    assert client.post(
+        f"/api/posts/{post_id}/comments", json={"content": "sympa ce post"}, headers=_auth(tok_other)
+    ).status_code == 200
+
+    import services.agent as agent_service
+    with database.get_conn() as conn:
+        admin_id = conn.execute("SELECT id FROM users WHERE username = 'mona_agent'").fetchone()["id"]
+    action_id = agent_service._propose_action(
+        "delete_post", {"post_id": post_id}, "test régression FK", admin_id
+    )
+
+    r_confirm = client.post(f"/api/agent/actions/{action_id}/confirm", headers=_auth(tok))
+    assert r_confirm.status_code == 200, r_confirm.text
+    assert r_confirm.json()["status"] == "executed"
+
+    r_feed = client.get("/api/feed", headers=_auth(tok))
+    assert not any(p["id"] == post_id for p in r_feed.json()["posts"])
+
+
 def test_propose_and_reject_action(client):
     tok = _reg(client, "dave_agent")
     _make_admin("dave_agent")

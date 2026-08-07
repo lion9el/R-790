@@ -1240,9 +1240,15 @@ def agent_list_actions(status: str | None = None, limit: int = 50, admin=Depends
 
 
 @app.post("/api/agent/actions/{action_id}/confirm")
-def agent_confirm_action(action_id: int, admin=Depends(require_admin)):
+async def agent_confirm_action(action_id: int, admin=Depends(require_admin)):
     """Exécute réellement une action 'pending' proposée par l'agent."""
-    return agent_service.confirm_action(action_id, admin["id"])
+    result = agent_service.confirm_action(action_id, admin["id"])
+    push = result.pop("_push", None)
+    if push:
+        await manager.send_to_user(
+            push["user_id"], {"type": "notification", "notification": push["notification"]}
+        )
+    return result
 
 
 @app.post("/api/agent/actions/{action_id}/reject")
