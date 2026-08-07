@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+# =============================================================================
+# SocialNet — point d'entrée UNIQUE
+# =============================================================================
+#   ./socialnet          → lance TOUT (API + bots + chronique)
+#   ./socialnet up       → idem
+#   ./socialnet api      → API seule (dev, --reload)
+#   ./socialnet stop     → arrête les process lancés par ce script
+#   ./socialnet status   → santé rapide
+#   ./socialnet logs     → queue des logs
+# =============================================================================
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+HOST="${HOST:-127.0.0.1}"
+PORT="${PORT:-8000}"
+URL="http://${HOST}:${PORT}"
+PID_DIR="${ROOT}/.run"
+API_LOG="${ROOT}/.run-api.log"
+BOTS_LOG="${ROOT}/.run-bots.log"
+API_PID_FILE="${PID_DIR}/api.pid"
+BOTS_PID_FILE="${PID_DIR}/bots.pid"
+
+mkdir -p "$PID_DIR"
+
+# Charger .env racine si présent
+if [[ -f "$ROOT/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT/.env"
+  set +a
+fi
+
+cmd="${1:-up}"
+
+_die() { echo "✗ $*" >&2; exit 1; }
+
+_cleanup_children() {
+  local pid
+  for f in "$BOTS_PID_FILE" "$API_PID_FILE"; do
+    if [[ -f "$f" ]]; then
+      pid="$(cat "$f" 2>/dev/null || true)"
+      if [[ -n "${pid}" ]] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+      fi
+      rm -f "$f"
+    fi
+  done
+}
+
+_ensure_env() {
+  if [[ ! -f "$ROOT/.env" && -f "$ROOT/.env.example" ]]; then
+    echo "→ Création de .env depuis .env.example"
+    cp "$ROOT/.env.example" "$ROOT/.env"
+    echo "  Édite .env et définis SOCIALNET_SECRET avant la prod."
+  fi
+  if [[ ! -f "$ROOT/bots/.env" && -f "$ROOT/bots/.env.example" ]]; then
+    cp "$ROOT/bots/.env.example" "$ROOT/bots/.env"
+    echo "→ bots/.env créé (ajoute GROQ_API_KEY pour activer les bots)"
+  fi
+}
+
+_build_c() {
+  echo "→ Extension C…"
+  (cd "$ROOT/c_ext" && python3 setup.py build_ext --inplace) >>"$API_LOG" 2>&1 \
+    || _die "Échec compilation C — voir $API_LOG"
+}
+
+_install_deps() {
+  echo "→ Dépendances Python…"
+  pip install -r "$ROOT/requirements.txt" -q --break-system-packages 2>/dev/null \
+    || pip install -r "$ROOT/requirements.txt" -q
+  if [[ -f "$ROOT/bots/requirements-bots.txt" ]]; then
+    pip install -r "$ROOT/bots/requirements-bots.txt" -q --break-system-packages 2>/dev/null \
+      || pip install -r "$ROOT/bots/requirements-bots.txt" -q || true
+  fi
+}
+
+_wait_api() {
+  echo -n "→ Attente API"
+  local i
+  for i in $(seq 1 50); do
+    if curl -sf "$URL/" >/dev/null 2>&1; then
+      echo " OK"
+      return 0
+    fi
+    echo -n "."
+    sleep 0.3
+  done
+  echo ""
+  tail -40 "$API_LOG" || true
+  _die "API non joignable — logs : $API_LOG"
+}
+
+_start_api() {
+  echo "→ API sur $URL"
+  (
+    cd "$ROOT/backend"
+    export PYTHONPATH="${ROOT}/backend:${ROOT}/c_ext${PYTHONPATH:+:$PYTHONPATH}"
+    exec python3 -m uvicorn app:app --host "$HOST" --port "$PORT"
+  ) >>"$API_LOG" 2>&1 &
+  echo $! >"$API_PID_FILE"
+}
+
+_start_bots() {
+  if [[ -f "$ROOT/bots/.env" ]] && grep -qE '^GROQ_API_KEY=.+' "$ROOT/bots/.env" 2>/dev/null; then
+    echo "→ Bots (nova / echo / orbit)…"
+    (
+      cd "$ROOT"
+      export SOCIALNET_URL="${SOCIALNET_URL:-$URL}"
+      exec python3 bots/runtime.py
+    ) >>"$BOTS_LOG" 2>&1 &
+    echo $! >"$BOTS_PID_FILE"
+    echo "  logs : $BOTS_LOG"
+  else
+    echo "→ Bots ignorés (pas de GROQ_API_KEY dans bots/.env)"
+  fi
+}
+
+_chronicle_once() {
+  if [[ -f "$ROOT/bots/chronicle.py" ]]; then
+    echo "→ Chronique initiale…"
+    SOCIALNET_URL="$URL" python3 "$ROOT/bots/chronicle.py" >>"$API_LOG" 2>&1 \
+      || echo "  (chronique reportée — normal au tout premier démarrage)"
+  fi
+}
+
+cmd_up() {
+  trap '_cleanup_children; echo; echo "Arrêté."; exit 0' INT TERM
+  : >"$API_LOG"
+  : >"$BOTS_LOG"
+  _ensure_env
+  _build_c
+  _install_deps
+  _start_api
+  _wait_api
+  _chronicle_once
+  _start_bots
+
+  echo ""
+  echo "╔══════════════════════════════════════════╗"
+  echo "║  SocialNet prêt                          ║"
+  echo "║  Terminal  : $URL"
+  echo "║  Ops       : $URL/ops"
+  echo "║  Logs API  : $API_LOG"
+  echo "║  Logs bots : $BOTS_LOG"
+  echo "║  Ctrl+C    : tout arrêter                ║"
+  echo "╚══════════════════════════════════════════╝"
+  echo ""
+
+  # Rester au premier plan tant que l'API vit
+  local api_pid
+  api_pid="$(cat "$API_PID_FILE")"
+  while kill -0 "$api_pid" 2>/dev/null; do
+    sleep 2
+  done
+  echo "API terminée."
+  _cleanup_children
+}
+
+cmd_api() {
+  _ensure_env
+  _build_c
+  _install_deps
+  echo "→ API seule (reload) $URL"
+  cd "$ROOT/backend"
+  export PYTHONPATH="${ROOT}/backend:${ROOT}/c_ext${PYTHONPATH:+:$PYTHONPATH}"
+  exec python3 -m uvicorn app:app --host "$HOST" --port "$PORT" --reload
+}
+
+cmd_stop() {
+  echo "→ Arrêt…"
+  _cleanup_children
+  # process orphelins éventuels sur le port
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -k "${PORT}/tcp" 2>/dev/null || true
+  fi
+  echo "OK"
+}
+
+cmd_status() {
+  echo "SocialNet status"
+  if curl -sf "$URL/api/ops/status" 2>/dev/null | python3 -m json.tool 2>/dev/null; then
+    :
+  elif curl -sf "$URL/" >/dev/null 2>&1; then
+    echo "API répond sur $URL (ops JSON indisponible)"
+  else
+    echo "API down ($URL)"
+  fi
+  [[ -f "$API_PID_FILE" ]] && echo "API pid  : $(cat "$API_PID_FILE")"
+  [[ -f "$BOTS_PID_FILE" ]] && echo "Bots pid : $(cat "$BOTS_PID_FILE")"
+}
+
+cmd_logs() {
+  echo "=== API (fin) ==="
+  tail -n 40 "$API_LOG" 2>/dev/null || echo "(pas de log)"
+  echo "=== BOTS (fin) ==="
+  tail -n 40 "$BOTS_LOG" 2>/dev/null || echo "(pas de log)"
+}
+
+case "$cmd" in
+  up|start|all) cmd_up ;;
+  api|dev)      cmd_api ;;
+  stop)         cmd_stop ;;
+  status)       cmd_status ;;
+  logs)         cmd_logs ;;
+  help|-h|--help)
+    echo "Usage: ./socialnet [up|api|stop|status|logs]"
+    echo "  up (défaut)  Lance API + chronique + bots"
+    echo "  api          API seule avec --reload"
+    echo "  stop         Arrête les process"
+    echo "  status       Santé"
+    echo "  logs         Dernières lignes de logs"
+    ;;
+  *)
+    _die "Commande inconnue: $cmd (essaie ./socialnet help)"
+    ;;
+esac
