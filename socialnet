@@ -16,7 +16,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
 HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-8000}"
+PORT="${PORT:-9000}"
 URL="http://${HOST}:${PORT}"
 PID_DIR="${ROOT}/.run"
 VENV_DIR="${ROOT}/.venv"

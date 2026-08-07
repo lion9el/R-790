@@ -47,7 +47,7 @@ echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
 | `DEPLOY_USER` | **oui** | `deploy` | Utilisateur SSH |
 | `DEPLOY_SSH_KEY` | **oui** | `-----BEGIN OPENSSH...` | Clé **privée** (ed25519 ou RSA) |
 | `DEPLOY_PATH` | non | `/home/deploy/socialnet` | Dossier distant (défaut `~/socialnet`) |
-| `DEPLOY_PORT` | non | `8000` | Port publié |
+| `DEPLOY_PORT` | non | `9000` | Port publié |
 | `DEPLOY_SSH_PORT` | non | `22` | Port SSH |
 | `SOCIALNET_SECRET` | recommandé | `openssl rand -hex 32` | Secret JWT prod |
 
@@ -84,7 +84,7 @@ chmod 600 .env
 
 1. Push sur `main` ou **Actions → Deploy → Run workflow**
 2. Job `remote` doit être vert
-3. Sur le serveur : `docker compose ps` et ouvrir `http://IP:8000`
+3. Sur le serveur : `docker compose ps` et ouvrir `http://IP:9000`
 
 ## 3. Déclenchement manuel
 
@@ -117,7 +117,7 @@ Volume Docker `socialnet-backups` recommandé.
 | `remote` skipped | `DEPLOY_HOST` non défini → normal |
 | `Permission denied` SSH | Mauvaise clé, mauvais user, `authorized_keys` |
 | `pull access denied` GHCR | `docker login ghcr.io` ; package visibility (public/private) |
-| App inaccessible | Firewall port 8000, `docker compose ps`, logs `docker compose logs` |
+| App inaccessible | Firewall port 9000 (ou DEPLOY_PORT), `docker compose ps`, logs `docker compose logs` |
 
 ## Visibilité du package GHCR
 

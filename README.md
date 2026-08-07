@@ -118,14 +118,14 @@ cp .env.example .env          # une fois (SOCIALNET_SECRET)
 
 Équivalents historiques : `./run.sh` · `./start-all.sh` → redirigent vers `./socialnet`.
 
-### Port déjà pris (ex. autre conteneur sur 8000)
+### Port
+
+Par défaut **9000** (hôte). L’API dans le conteneur écoute toujours sur 8000 en interne.
 
 ```bash
-PORT=9000 ./socialnet
-# → http://127.0.0.1:9000
+./socialnet                 # → http://127.0.0.1:9000
+PORT=8080 ./socialnet       # autre port si besoin
 ```
-
-Le fichier `docker-compose.yml` mappe `${PORT:-8000}:8000`.
 
 ### Docker
 

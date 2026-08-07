@@ -8,7 +8,7 @@ services:
   socialnet:
     image: ghcr.io/lion9el/r-790:latest
     ports:
-      - "${DEPLOY_PORT:-8000}:8000"
+      - "${DEPLOY_PORT:-9000}:8000"
     environment:
       - SOCIALNET_SECRET=${SOCIALNET_SECRET:?définir SOCIALNET_SECRET}
       - SOCIALNET_BACKUP_DIR=/app/backups

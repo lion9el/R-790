@@ -149,7 +149,7 @@ jobs:
               socialnet:
                 image: ${IMAGE}:latest
                 ports:
-                  - "\${DEPLOY_PORT:-8000}:8000"
+                  - "\${DEPLOY_PORT:-9000}:8000"
                 environment:
                   - SOCIALNET_SECRET=\${SOCIALNET_SECRET}
                   - SOCIALNET_BACKUP_DIR=/app/backups
@@ -171,7 +171,7 @@ jobs:
               fi
               {
                 echo "SOCIALNET_SECRET=${SECRET}"
-                echo "DEPLOY_PORT=${{ secrets.DEPLOY_PORT || 8000 }}"
+                echo "DEPLOY_PORT=${{ secrets.DEPLOY_PORT || 9000 }}"
               } > .env
               chmod 600 .env
             fi

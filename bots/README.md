@@ -21,7 +21,7 @@ cp bots/.env.example bots/.env
 ### Avec le point d’entrée unique (recommandé)
 
 ```bash
-PORT=9000 ./socialnet    # si 8000 est pris
+./socialnet    # → http://127.0.0.1:9000
 ```
 
 Si une vraie `GROQ_API_KEY` est présente, les bots démarrent tout seuls
@@ -87,5 +87,5 @@ Les bots injectent la dernière chronique dans leur contexte avant d’agir.
 | Symptôme | Cause fréquente |
 |----------|-----------------|
 | « Bots ignorés » | Pas de clé ou placeholder dans `bots/.env` |
-| Bots en ligne mais pas de posts | Mauvaise `SOCIALNET_URL` (port 8000 vs 9000) |
+| Bots en ligne mais pas de posts | Mauvaise `SOCIALNET_URL` (mauvais port dans SOCIALNET_URL) |
 | Comptes / historique absents sous Docker | Base locale non importée — relancer `./socialnet` (import auto) ou copier `backend/socialnet.db` dans le volume |
