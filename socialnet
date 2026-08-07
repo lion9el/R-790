@@ -84,6 +84,42 @@ _ensure_env() {
 
 # ─── Mode Docker (recommandé : zéro friction) ───────────────────────────────
 
+_import_local_db_to_docker() {
+  # Copie backend/socialnet.db (+ uploads) vers le volume Docker si présent
+  local local_db="$ROOT/backend/socialnet.db"
+  if [[ ! -f "$local_db" ]]; then
+    echo "→ Pas de base locale (backend/socialnet.db) — volume Docker inchangé"
+    return 0
+  fi
+  echo "→ Import de la base locale vers Docker…"
+  # Nom de volume compose : <project>_socialnet-data
+  local vol
+  vol="$(_compose config --volumes 2>/dev/null | head -1 || echo "socialnet_socialnet-data")"
+  # Fallback noms courants
+  for cand in "socialnet_socialnet-data" "r-790_socialnet-data" "${vol}"; do
+    if docker volume inspect "$cand" >/dev/null 2>&1; then
+      vol="$cand"
+      break
+    fi
+  done
+  docker run --rm \
+    -v "${vol}:/dest" \
+    -v "$ROOT/backend:/src:ro" \
+    alpine:3.20 sh -c '
+      set -e
+      if [ -f /src/socialnet.db ]; then
+        cp -a /src/socialnet.db /dest/socialnet.db
+        echo "  socialnet.db importé"
+      fi
+      if [ -d /src/uploads ]; then
+        mkdir -p /dest/uploads
+        cp -a /src/uploads/. /dest/uploads/ 2>/dev/null || true
+        echo "  uploads importés"
+      fi
+      ls -la /dest/socialnet.db 2>/dev/null || true
+    ' || echo "  (import partiel — volume peut-être encore vide, relance après le 1er up)"
+}
+
 cmd_docker() {
   _ensure_env
   if ! _has_docker; then
@@ -96,11 +132,23 @@ cmd_docker() {
   echo "docker" >"$MODE_FILE"
   echo "→ Build + démarrage…"
   _compose up --build -d
+  # Après création du volume, importer l'ancienne base si elle existe
+  _import_local_db_to_docker
+  # Redémarrer le conteneur pour qu'il lise la DB importée
+  _compose restart socialnet 2>/dev/null || true
   echo -n "→ Attente API"
   local i
   for i in $(seq 1 60); do
     if curl -sf "$URL/" >/dev/null 2>&1; then
       echo " OK"
+      # Bots sur l'hôte (l'image Docker ne les embarque pas)
+      _ensure_venv 2>/dev/null || true
+      if [[ -x "${VENV_DIR}/bin/python" ]]; then
+        PYTHON="${VENV_DIR}/bin/python"
+        PIP="${VENV_DIR}/bin/pip"
+        "$PIP" install -q -r "$ROOT/bots/requirements-bots.txt" 2>/dev/null || true
+      fi
+      _start_bots
       echo ""
       echo "╔══════════════════════════════════════════╗"
       echo "║  SocialNet prêt (Docker)                 ║"
