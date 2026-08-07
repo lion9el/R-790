@@ -34,11 +34,18 @@ def require_admin(authorization: str = Header(default=None)) -> dict:
 
 
 def _reject_if_revoked(user: dict) -> None:
-    """Lève 401 si le jeton a été révoqué (individuellement ou globalement)."""
+    """Lève 401 si le jeton a été révoqué (individuellement ou globalement)
+    ou 403 si le compte a été banni depuis l'émission du jeton (un bannissement
+    doit couper l'accès immédiatement, pas seulement empêcher un futur login)."""
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT tokens_valid_after FROM users WHERE id = ?", (user["id"],)
+            "SELECT tokens_valid_after, is_banned, ban_reason FROM users WHERE id = ?", (user["id"],)
         ).fetchone()
+        if row and row["is_banned"]:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Compte banni. Raison : {row['ban_reason'] or 'non précisée'}.",
+            )
         if row and row["tokens_valid_after"] is not None and user["iat_ms"] <= row["tokens_valid_after"]:
             raise HTTPException(
                 status_code=401,

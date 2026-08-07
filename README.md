@@ -194,10 +194,20 @@ Un agent LangChain, réservé aux administrateurs, aide à modérer et à
 comprendre la plateforme via `/api/agent/run` (langage naturel).
 
 **Conçu pour ne jamais agir seul sur des actions destructrices** : il dispose
-d'outils de lecture (recherche, signalements ouverts, hashtags tendance)
-exécutés immédiatement, et d'outils de proposition (suppression de post,
-résolution de signalement) qui créent une action `pending` — jamais exécutée
-tant qu'un admin ne l'a pas confirmée via `/api/agent/actions/{id}/confirm`.
+d'outils de lecture (recherche posts/utilisateurs, signalements ouverts,
+contenu exact d'une cible signalée, profil complet d'un utilisateur, stats
+plateforme, hashtags tendance) exécutés immédiatement, et d'outils de
+proposition qui créent une action `pending` — jamais exécutée tant qu'un
+admin ne l'a pas confirmée via `/api/agent/actions/{id}/confirm` :
+
+| Outil | Effet une fois confirmé |
+|-------|--------------------------|
+| `propose_delete_post` / `propose_delete_comment` | Supprime le contenu |
+| `propose_resolve_report` | Marque un signalement `reviewed` / `dismissed` |
+| `propose_ban_user` | Bannit le compte (bloque connexion + coupe ses sessions actives). Refusé si la cible est admin. |
+| `propose_unban_user` | Lève un bannissement |
+| `propose_force_logout` | Déconnecte toutes les sessions d'un compte sans le bannir (suspicion de piratage) |
+| `propose_warn_user` | Envoie une notification d'avertissement à l'utilisateur |
 
 | Route | Description |
 |-------|-------------|

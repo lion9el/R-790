@@ -112,3 +112,109 @@ def test_unknown_action_type_rejected():
 
     with pytest.raises(ValueError):
         agent_service._propose_action("ban_everyone", {}, "n'importe quoi", requested_by=1)
+
+
+def test_ban_user_blocks_login_and_existing_session(client):
+    tok_admin = _reg(client, "erin_agent")
+    _make_admin("erin_agent")
+    tok_target = _reg(client, "frank_target")
+
+    # La session de frank fonctionne avant le ban
+    r0 = client.get("/api/notifications", headers=_auth(tok_target))
+    assert r0.status_code == 200
+
+    import services.agent as agent_service
+    with database.get_conn() as conn:
+        admin_id = conn.execute("SELECT id FROM users WHERE username = 'erin_agent'").fetchone()["id"]
+        target_id = conn.execute("SELECT id FROM users WHERE username = 'frank_target'").fetchone()["id"]
+    action_id = agent_service._propose_action(
+        "ban_user", {"user_id": target_id, "username": "frank_target"}, "spam répété", admin_id
+    )
+
+    r1 = client.post(f"/api/agent/actions/{action_id}/confirm", headers=_auth(tok_admin))
+    assert r1.status_code == 200
+    assert r1.json()["status"] == "executed"
+
+    # Session déjà ouverte : coupée immédiatement (pas seulement au prochain login)
+    r2 = client.get("/api/notifications", headers=_auth(tok_target))
+    assert r2.status_code == 403
+
+    # Nouveau login : refusé aussi
+    r3 = client.post("/api/login", json={"username": "frank_target", "password": "secret12"})
+    assert r3.status_code == 403
+
+    # Débannissement : lève le blocage
+    action_id2 = agent_service._propose_action(
+        "unban_user", {"user_id": target_id, "username": "frank_target"}, "recours accepté", admin_id
+    )
+    r4 = client.post(f"/api/agent/actions/{action_id2}/confirm", headers=_auth(tok_admin))
+    assert r4.status_code == 200
+    r5 = client.post("/api/login", json={"username": "frank_target", "password": "secret12"})
+    assert r5.status_code == 200
+
+
+def test_cannot_ban_admin(client):
+    tok_admin = _reg(client, "gina_agent")
+    _make_admin("gina_agent")
+    _reg(client, "henry_agent")
+    _make_admin("henry_agent")
+
+    import services.agent as agent_service
+    with database.get_conn() as conn:
+        admin_id = conn.execute("SELECT id FROM users WHERE username = 'gina_agent'").fetchone()["id"]
+        target_id = conn.execute("SELECT id FROM users WHERE username = 'henry_agent'").fetchone()["id"]
+    action_id = agent_service._propose_action(
+        "ban_user", {"user_id": target_id, "username": "henry_agent"}, "test", admin_id
+    )
+    r = client.post(f"/api/agent/actions/{action_id}/confirm", headers=_auth(tok_admin))
+    assert r.status_code == 200
+    assert r.json()["status"] == "failed"
+    assert "administrateur" in r.json()["result"]["error"]
+
+
+def test_force_logout_does_not_ban(client):
+    tok_admin = _reg(client, "ivy_agent")
+    _make_admin("ivy_agent")
+    tok_target = _reg(client, "jack_target")
+
+    import services.agent as agent_service
+    with database.get_conn() as conn:
+        admin_id = conn.execute("SELECT id FROM users WHERE username = 'ivy_agent'").fetchone()["id"]
+        target_id = conn.execute("SELECT id FROM users WHERE username = 'jack_target'").fetchone()["id"]
+    action_id = agent_service._propose_action(
+        "force_logout", {"user_id": target_id, "username": "jack_target"}, "compte probablement compromis", admin_id
+    )
+    r1 = client.post(f"/api/agent/actions/{action_id}/confirm", headers=_auth(tok_admin))
+    assert r1.status_code == 200
+
+    # Ancienne session coupée...
+    r2 = client.get("/api/notifications", headers=_auth(tok_target))
+    assert r2.status_code == 401
+
+    # ...mais un nouveau login fonctionne (pas banni)
+    r3 = client.post("/api/login", json={"username": "jack_target", "password": "secret12"})
+    assert r3.status_code == 200
+
+
+def test_warn_user_creates_notification(client):
+    tok_admin = _reg(client, "kate_agent")
+    _make_admin("kate_agent")
+    tok_target = _reg(client, "leo_target")
+
+    import services.agent as agent_service
+    with database.get_conn() as conn:
+        admin_id = conn.execute("SELECT id FROM users WHERE username = 'kate_agent'").fetchone()["id"]
+        target_id = conn.execute("SELECT id FROM users WHERE username = 'leo_target'").fetchone()["id"]
+    action_id = agent_service._propose_action(
+        "warn_user",
+        {"user_id": target_id, "username": "leo_target", "message": "merci de respecter les règles"},
+        "langage limite",
+        admin_id,
+    )
+    r1 = client.post(f"/api/agent/actions/{action_id}/confirm", headers=_auth(tok_admin))
+    assert r1.status_code == 200
+
+    r2 = client.get("/api/notifications", headers=_auth(tok_target))
+    assert r2.status_code == 200
+    notifs = r2.json()
+    assert any(n["type"] == "admin_warning" and "respecter" in n["content"] for n in notifs)

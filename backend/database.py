@@ -61,6 +61,12 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     if "is_admin" not in users_columns:
         conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
         conn.commit()
+    if "is_banned" not in users_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    if "ban_reason" not in users_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN ban_reason TEXT")
+        conn.commit()
 
 
 @contextmanager
