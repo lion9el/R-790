@@ -72,7 +72,7 @@ jobs:
 
       - name: Pull + restart sur le VPS
         if: steps.check.outputs.enabled == 'true'
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
