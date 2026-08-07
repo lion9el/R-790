@@ -1,129 +1,125 @@
 # Déploiements automatisés (GitHub Actions)
 
-## Workflows
+## Vue d’ensemble
 
-| Fichier | Déclencheur | Rôle |
-|---------|-------------|------|
-| `tests.yml` | push/PR `main` | Tests C + API |
-| `deploy.yml` | push `main` + manuel | Tests → image Docker → GHCR → SSH optionnel |
-| `bots-check.yml` | changements dans `bots/` | Syntaxe + init SQLite |
+À chaque push sur `main` (ou déclenchement manuel) :
 
-## Image Docker
+| Job | Rôle | Condition |
+|-----|------|-----------|
+| **test** | pytest C + API | toujours |
+| **docker** | Build image → push **ghcr.io** | après tests OK |
+| **remote** | SSH sur le VPS → `docker compose up` | si `DEPLOY_HOST` est défini |
 
-Après chaque merge sur `main` :
+Image produite :
 
-```bash
-docker pull ghcr.io/lion9el/R-790:latest
+```text
+ghcr.io/lion9el/r-790:latest
+ghcr.io/lion9el/r-790:<sha>
 ```
 
-(Le dépôt doit être public, ou tu dois être authentifié sur GHCR.)
+(Les noms GHCR sont en **minuscules**.)
 
-## Activer le déploiement distant (VPS)
+## 1. Image Docker seule (déjà actif)
 
-Dans GitHub → **Settings → Secrets and variables → Actions**, ajoute :
+Rien à configurer : `GITHUB_TOKEN` suffit pour pousser vers GHCR.
 
-| Secret | Exemple |
-|--------|---------|
-| `DEPLOY_HOST` | `203.0.113.10` |
-| `DEPLOY_USER` | `deploy` |
-| `DEPLOY_SSH_KEY` | clé privée SSH |
-| `DEPLOY_PATH` | `/home/deploy/socialnet` |
-
-Sur le serveur, un `docker-compose.yml` qui tire `ghcr.io/lion9el/R-790:latest`.
-
-Sans ces secrets, le job `remote` est ignoré ; seuls tests + push d’image tournent.
-
-## Webhook manuel (optionnel)
-
-Pour déclencher un service externe à chaque push :
-
-1. Settings → Webhooks → Add webhook  
-2. Payload URL = ton endpoint  
-3. Content type `application/json`  
-4. Events : `push` (et `workflow_run` si besoin)
-
-## socialnet-world
-
-Le dépôt des bots a son propre workflow `validate.yml` (structure des dossiers).
-
-## Variables d’environnement (production)
-
-| Variable | Obligatoire | Description |
-|----------|-------------|-------------|
-| `SOCIALNET_SECRET` | **oui** | Secret JWT fort (jamais la valeur d’exemple) |
-| `SOCIALNET_DEBUG` | non | `1` / `true` pour logs plus verbeux |
-
-Sans `SOCIALNET_SECRET`, le serveur génère un secret aléatoire à chaque
-démarrage : **toutes les sessions sont invalidées au restart** — acceptable
-en dev uniquement.
-
-Exemple `docker run` :
+Après un push sur `main` :
 
 ```bash
-docker run --rm -p 8000:8000 \
-  -e SOCIALNET_SECRET='$(openssl rand -hex 32)' \
-  -v socialnet-data:/app/backend \
-  ghcr.io/lion9el/R-790:latest
+docker pull ghcr.io/lion9el/r-790:latest
 ```
 
-Monter un volume sur `backend/` (ou au minimum `socialnet.db` + `uploads/`)
-pour persister les données.
-
-## Fonctionnalités exposées en prod
-
-Toutes les routes documentées dans le **README** (compte, modération, profil,
-export RGPD, etc.) sont disponibles dès que l’image tourne. Le reset de mot
-de passe renvoie encore le token dans la réponse JSON (mode démo) : en
-production réelle, brancher l’envoi email et ne plus exposer le token.
-
-
-## Backups (Phase 2)
-
-Variables :
-
-| Variable | Défaut | Rôle |
-|----------|--------|------|
-| `SOCIALNET_BACKUP_DIR` | `./backups` | Dossier des snapshots |
-| `SOCIALNET_BACKUP_INTERVAL` | `3600` | Secondes entre backups auto |
-| `SOCIALNET_BACKUP_KEEP` | `14` | Nombre de snapshots conservés |
-
-Manuel :
+Si le dépôt est **privé**, se connecter d’abord :
 
 ```bash
-./scripts/backup.sh
-# ou POST /api/ops/backup (authentifié)
+echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
 ```
 
-Chaque snapshot contient `socialnet.db` (+ wal/shm) et `uploads.tar.gz`.
+## 2. Déploiement remote (VPS)
 
-## Postgres (optionnel)
+### Secrets GitHub
+
+**Settings → Secrets and variables → Actions → New repository secret**
+
+| Secret | Obligatoire | Exemple | Description |
+|--------|-------------|---------|-------------|
+| `DEPLOY_HOST` | **oui** | `203.0.113.10` | IP ou hostname du serveur |
+| `DEPLOY_USER` | **oui** | `deploy` | Utilisateur SSH |
+| `DEPLOY_SSH_KEY` | **oui** | `-----BEGIN OPENSSH...` | Clé **privée** (ed25519 ou RSA) |
+| `DEPLOY_PATH` | non | `/home/deploy/socialnet` | Dossier distant (défaut `~/socialnet`) |
+| `DEPLOY_PORT` | non | `8000` | Port publié |
+| `DEPLOY_SSH_PORT` | non | `22` | Port SSH |
+| `SOCIALNET_SECRET` | recommandé | `openssl rand -hex 32` | Secret JWT prod |
+
+Sans `DEPLOY_HOST`, le job **remote** est **ignoré** (pas d’échec).
+
+### Préparer le serveur (une fois)
 
 ```bash
-docker compose --profile postgres up -d db
+# Sur le VPS
+sudo apt update && sudo apt install -y docker.io docker-compose-v2
+sudo usermod -aG docker $USER   # puis reconnecte-toi
+
+# Clé SSH : la clé PUBLIQUE doit être dans ~/.ssh/authorized_keys
+# la PRIVÉE va dans le secret GitHub DEPLOY_SSH_KEY
 ```
 
-L'application utilise encore **SQLite** par défaut. Le service Postgres
-est provisionné pour une migration future (`DATABASE_URL`). Ne pas pointer
-l'app dessus sans migration de schéma.
+Option A — laisser Actions créer `docker-compose.yml` au premier deploy.
 
-
-## Postgres live (Phase 3)
+Option B — cloner et utiliser le fichier du dépôt :
 
 ```bash
-docker compose --profile postgres up --build
+mkdir -p ~/socialnet && cd ~/socialnet
+# copier docker-compose.prod.yml depuis le repo, le renommer :
+curl -sL https://raw.githubusercontent.com/lion9el/R-790/main/docker-compose.prod.yml \
+  -o docker-compose.yml
+# Corriger l’image si besoin (minuscules) :
+# image: ghcr.io/lion9el/r-790:latest
+
+echo "SOCIALNET_SECRET=$(openssl rand -hex 32)" > .env
+chmod 600 .env
 ```
 
-- Service `db` : Postgres 16
-- Service `socialnet-pg` : API avec
-  `DATABASE_URL=postgresql://socialnet:…@db:5432/socialnet`
-- Schéma : `backend/schema.postgres.sql`
-- Dépendance : `psycopg[binary]` (dans requirements.txt)
+### Vérifier
 
-Sans profile, l'app reste en **SQLite** (idéal pour dev / tests).
+1. Push sur `main` ou **Actions → Deploy → Run workflow**
+2. Job `remote` doit être vert
+3. Sur le serveur : `docker compose ps` et ouvrir `http://IP:8000`
 
-Variable manuelle :
+## 3. Déclenchement manuel
 
-```bash
-export DATABASE_URL=postgresql://user:pass@localhost:5432/socialnet
-cd backend && uvicorn app:app --reload
-```
+Actions → **Deploy** → **Run workflow**
+
+- `skip_remote=true` : build GHCR uniquement, pas de SSH
+
+## 4. Postgres en production
+
+Sur le VPS, utiliser le profile ou un compose étendu avec `DATABASE_URL`.  
+Voir aussi `docker-compose.yml` (profile `postgres`) dans le dépôt.
+
+## 5. Backups
+
+Variables optionnelles sur le conteneur :
+
+| Variable | Défaut |
+|----------|--------|
+| `SOCIALNET_BACKUP_DIR` | `/app/backups` |
+| `SOCIALNET_BACKUP_INTERVAL` | `3600` |
+| `SOCIALNET_BACKUP_KEEP` | `14` |
+
+Volume Docker `socialnet-backups` recommandé.
+
+## Dépannage
+
+| Symptôme | Piste |
+|----------|--------|
+| `docker` job rouge | Logs build — souvent deps manquantes (`setuptools`, libs C) |
+| `remote` skipped | `DEPLOY_HOST` non défini → normal |
+| `Permission denied` SSH | Mauvaise clé, mauvais user, `authorized_keys` |
+| `pull access denied` GHCR | `docker login ghcr.io` ; package visibility (public/private) |
+| App inaccessible | Firewall port 8000, `docker compose ps`, logs `docker compose logs` |
+
+## Visibilité du package GHCR
+
+GitHub → **Packages** → `r-790` → Package settings →  
+Change visibility to **Public** si tu veux `docker pull` sans token.

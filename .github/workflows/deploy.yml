@@ -1,7 +1,9 @@
 # Déploiement automatisé SocialNet
-# - build image Docker
-# - push vers GitHub Container Registry (ghcr.io)
-# - optionnel : redéploiement SSH si secrets configurés
+# 1) Tests  2) Build + push GHCR  3) SSH remote (si secrets présents)
+#
+# Secrets (Settings → Secrets and variables → Actions) :
+#   DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY  (obligatoires pour remote)
+#   DEPLOY_PATH, SOCIALNET_SECRET, DEPLOY_PORT, DEPLOY_SSH_PORT  (optionnels)
 
 name: Deploy
 
@@ -14,36 +16,60 @@ on:
         description: "Raison du déploiement manuel"
         required: false
         default: "manual"
+      skip_remote:
+        description: "Skip déploiement SSH (true/false)"
+        required: false
+        default: "false"
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
 
 permissions:
   contents: read
   packages: write
 
+env:
+  REGISTRY: ghcr.io
+  # GHCR exige des noms en minuscules
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
 jobs:
   test:
+    name: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+
       - name: Dépendances
         run: pip install -r requirements.txt -r requirements-dev.txt
+
       - name: Extension C
         run: python setup.py build_ext --inplace
         working-directory: c_ext
+
       - name: Tests C
         run: python -m pytest -q
         working-directory: c_ext
+
       - name: Tests API
         run: python -m pytest -q
         working-directory: backend
 
   docker:
+    name: docker
     needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Login GHCR
         uses: docker/login-action@v3
@@ -68,26 +94,34 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
 
-  # Déploiement distant optionnel (VPS / serveur)
-  # Secrets requis : DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY, DEPLOY_PATH
   remote:
+    name: remote
     needs: docker
     runs-on: ubuntu-latest
-    # Configure les secrets DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY (et optionnel DEPLOY_PATH)
-    # pour activer ce job. S'ils sont absents, l'étape SSH échoue doucement.
+    # Note: secrets ne sont PAS utilisables dans if: au niveau job.
+    # On détecte dans un step, puis on conditionne le SSH.
     steps:
       - name: Vérifier secrets deploy
         id: check
         env:
           HOST: ${{ secrets.DEPLOY_HOST }}
+          SKIP: ${{ github.event.inputs.skip_remote }}
         run: |
-          if [ -n "$HOST" ]; then
-            echo "enabled=true" >> $GITHUB_OUTPUT
+          if [ "${SKIP}" = "true" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Skip demandé (workflow_dispatch)"
+          elif [ -n "$HOST" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "DEPLOY_HOST présent → déploiement SSH activé"
           else
-            echo "enabled=false" >> $GITHUB_OUTPUT
-            echo "Pas de DEPLOY_HOST — skip déploiement SSH"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Pas de secret DEPLOY_HOST → remote ignoré (normal en dev)"
           fi
+
       - name: Déployer via SSH
         if: steps.check.outputs.enabled == 'true'
         uses: appleboy/ssh-action@v1.2.0
@@ -95,13 +129,56 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          script_stop: true
+          envs: GITHUB_TOKEN,GITHUB_ACTOR,GITHUB_REPOSITORY
           script: |
-            set -e
+            set -euo pipefail
             DEPLOY_PATH="${{ secrets.DEPLOY_PATH }}"
-            cd "${DEPLOY_PATH:-$HOME/socialnet}"
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin || true
-            docker pull ghcr.io/${{ github.repository }}:latest
+            DEPLOY_PATH="${DEPLOY_PATH:-$HOME/socialnet}"
+            # minuscules obligatoires pour GHCR
+            IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+            mkdir -p "$DEPLOY_PATH"
+            cd "$DEPLOY_PATH"
+
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+            if [ ! -f docker-compose.yml ]; then
+              cat > docker-compose.yml << COMPOSE
+            services:
+              socialnet:
+                image: ${IMAGE}:latest
+                ports:
+                  - "\${DEPLOY_PORT:-8000}:8000"
+                environment:
+                  - SOCIALNET_SECRET=\${SOCIALNET_SECRET}
+                  - SOCIALNET_BACKUP_DIR=/app/backups
+                volumes:
+                  - socialnet-data:/app/backend
+                  - socialnet-backups:/app/backups
+                restart: unless-stopped
+            volumes:
+              socialnet-data:
+              socialnet-backups:
+            COMPOSE
+            fi
+
+            if [ ! -f .env ]; then
+              SECRET='${{ secrets.SOCIALNET_SECRET }}'
+              if [ -z "$SECRET" ]; then
+                SECRET=$(openssl rand -hex 32)
+                echo "⚠ SOCIALNET_SECRET généré localement — définis le secret GitHub pour le figer"
+              fi
+              {
+                echo "SOCIALNET_SECRET=${SECRET}"
+                echo "DEPLOY_PORT=${{ secrets.DEPLOY_PORT || 8000 }}"
+              } > .env
+              chmod 600 .env
+            fi
+
+            docker pull "${IMAGE}:latest"
             docker compose pull || true
             docker compose up -d --remove-orphans
             docker image prune -f
-            echo "Deploy OK $(date -u)"
+            echo "Deploy OK $(date -u +%Y-%m-%dT%H:%M:%SZ) → ${IMAGE}:latest"
+            docker compose ps

@@ -1,0 +1,31 @@
+# Compose production — tire l'image GHCR (pas de build local)
+# Usage sur le VPS :
+#   export SOCIALNET_SECRET='...'
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d
+
+services:
+  socialnet:
+    image: ghcr.io/lion9el/r-790:latest
+    ports:
+      - "${DEPLOY_PORT:-8000}:8000"
+    environment:
+      - SOCIALNET_SECRET=${SOCIALNET_SECRET:?définir SOCIALNET_SECRET}
+      - SOCIALNET_BACKUP_DIR=/app/backups
+      - SOCIALNET_BACKUP_INTERVAL=${SOCIALNET_BACKUP_INTERVAL:-3600}
+      - SOCIALNET_BACKUP_KEEP=${SOCIALNET_BACKUP_KEEP:-14}
+      - DATABASE_URL=${DATABASE_URL:-}
+    volumes:
+      - socialnet-data:/app/backend
+      - socialnet-backups:/app/backups
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  socialnet-data:
+  socialnet-backups:
