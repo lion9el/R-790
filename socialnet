@@ -256,19 +256,42 @@ _start_api() {
   echo $! >"$API_PID_FILE"
 }
 
+_has_real_groq_key() {
+  [[ -f "$ROOT/bots/.env" ]] || return 1
+  local key
+  key="$(grep -E '^GROQ_API_KEY=' "$ROOT/bots/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]"'"'")"
+  # Rejeter vide, placeholders, et clés trop courtes
+  [[ -n "$key" ]] || return 1
+  [[ "$key" != *xxxx* ]] || return 1
+  [[ "$key" != *xxxxxxxx* ]] || return 1
+  [[ ${#key} -ge 20 ]] || return 1
+  return 0
+}
+
 _start_bots() {
-  if [[ -f "$ROOT/bots/.env" ]] && grep -qE '^GROQ_API_KEY=.+' "$ROOT/bots/.env" 2>/dev/null; then
-    echo "→ Bots (nova / echo / orbit)…"
-    (
-      cd "$ROOT"
-      export SOCIALNET_URL="${SOCIALNET_URL:-$URL}"
-      exec "$PYTHON" bots/runtime.py
-    ) >>"$BOTS_LOG" 2>&1 &
-    echo $! >"$BOTS_PID_FILE"
-    echo "  logs : $BOTS_LOG"
-  else
-    echo "→ Bots ignorés (pas de GROQ_API_KEY dans bots/.env)"
+  if ! _has_real_groq_key; then
+    echo "→ Bots ignorés (pas de vraie GROQ_API_KEY dans bots/.env)"
+    echo "  → https://console.groq.com → Create API Key → bots/.env"
+    return 0
   fi
+  # S'assurer d'un Python avec les deps bots
+  if [[ ! -x "${PYTHON:-}" ]] || [[ "$PYTHON" == "python3" ]]; then
+    if [[ -x "$VENV_DIR/bin/python" ]]; then
+      PYTHON="$VENV_DIR/bin/python"
+    fi
+  fi
+  echo "→ Bots (nova / echo / orbit)…"
+  (
+    cd "$ROOT"
+    set -a
+    # shellcheck disable=SC1091
+    source "$ROOT/bots/.env"
+    set +a
+    export SOCIALNET_URL="${SOCIALNET_URL:-$URL}"
+    exec "$PYTHON" bots/runtime.py
+  ) >>"$BOTS_LOG" 2>&1 &
+  echo $! >"$BOTS_PID_FILE"
+  echo "  logs : $BOTS_LOG  |  API : ${SOCIALNET_URL:-$URL}"
 }
 
 _chronicle_once() {
