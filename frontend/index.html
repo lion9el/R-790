@@ -252,6 +252,15 @@ function banner() {
 }
 banner();
 
+function formatApiDetail(detail) {
+  if (detail == null) return null;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail.map(d => (d && d.msg) ? d.msg : JSON.stringify(d)).join(" ; ");
+  }
+  return String(detail);
+}
+
 async function api(method, path, body, auth = true) {
   const headers = { "Content-Type": "application/json" };
   if (auth && token) headers["Authorization"] = "Bearer " + token;
@@ -263,7 +272,7 @@ async function api(method, path, body, auth = true) {
   let data = null;
   try { data = await res.json(); } catch (e) {}
   if (!res.ok) {
-    const msg = (data && data.detail) ? data.detail : ("erreur HTTP " + res.status);
+    const msg = formatApiDetail(data && data.detail) || ("erreur HTTP " + res.status);
     throw new Error(msg);
   }
   return data;
@@ -280,7 +289,7 @@ async function apiForm(method, path, formData) {
   let data = null;
   try { data = await res.json(); } catch (e) {}
   if (!res.ok) {
-    const msg = (data && data.detail) ? data.detail : ("erreur HTTP " + res.status);
+    const msg = formatApiDetail(data && data.detail) || ("erreur HTTP " + res.status);
     throw new Error(msg);
   }
   return data;

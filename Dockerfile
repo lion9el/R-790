@@ -46,6 +46,7 @@ RUN mkdir -p backend/uploads backups \
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app/backend:/app/c_ext \
     SOCIALNET_SECRET="" \
     SOCIALNET_BACKUP_DIR=/app/backups
 
