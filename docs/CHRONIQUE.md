@@ -1,267 +1,368 @@
-# Chronique de session — stabilisation du lancement (2026-08-07)
+# Chronique du projet SocialNet (R-790)
 
-Document de bord : **pourquoi** chaque changement, **ce qu’on a vu**,
-**questions posées**, **options envisagées**, **décision**, **résultat**.
+Du **premier commit** (2026-07-24) à l’état actuel (2026-08-07).
 
-Contexte : dépôt `lion9el/R-790` (SocialNet), machine utilisateur sous
-WSL (`/mnt/d/socialnet`), Python 3.14 côté hôte, Docker Desktop disponible,
-autre stack déjà sur le port **8000** (`docker-web`).
+Pour chaque phase : **contexte / question**, **ce qu’on a vu**, **options**,
+**décision**, **résultat**, **commits repères**.
 
 ---
 
-## 0. Objectif de départ
+## Phase 0 — Naissance du dépôt (2026-07-24)
 
-> Lancer le projet doit être **très simple**, sans friction.
-> Une commande documentée doit marcher sur n’importe quel environnement.
-
-Point d’entrée existant : `./socialnet` (commit `e11b542`).
-
----
-
-## 1. PEP 668 — `externally-managed-environment`
-
-### Vu
-```
-error: externally-managed-environment
-pip install … bloqué sur Debian/Ubuntu/WSL
-```
-
-### Pourquoi
-Le script faisait un `pip install` **système**. Les distros récentes
-interdisent ça (PEP 668) sauf venv ou `--break-system-packages`.
-
-### Options
-1. Forcer `--break-system-packages` (fragile, pollue le système)
-2. Virtualenv local `.venv` (propre, standard)
-3. Docker uniquement (zéro Python hôte)
+### Question
+Peut-on construire un réseau social **complet** en Python + extension C,
+avec une interface terminal web, sans framework front lourd ?
 
 ### Décision
-**Option 2** d’abord (`9d00aaf`) : créer `.venv`, y installer les deps,
-lancer API/bots/C avec ce Python.
+Créer `R-790` / SocialNet : monolithe pédagogique clair.
 
 ### Résultat
-Mieux, mais `python3 -m venv` peut manquer (`python3-venv` non installé)
-et `sudo` n’était pas disponible chez l’utilisateur.
+Commit fondateur :
+
+| Commit | Contenu |
+|--------|---------|
+| `8796521` | Version initiale stable : comptes, posts, likes, commentaires, follow, messagerie, **recherche C** (index inversé) |
+
+Stack de base : FastAPI, SQLite, JWT, frontend `index.html` style CRT, `c_ext/searchmodule.c`.
 
 ---
 
-## 2. Lancement zéro friction — Docker prioritaire
+## Phase 1 — Temps réel, médias, pagination (2026-07-25)
 
-### Pourquoi
-L’utilisateur refusait toute friction (`sudo`, paquets manquants, etc.).
+### Questions
+- Comment pousser messages / posts sans recharger la page ?
+- Comment joindre des images sans ouvrir une faille upload ?
+- Comment paginer fil et recherche sans offset fragiles partout ?
 
-### Options
-1. Documenter trois chemins (Docker / venv / manuel) — trop complexe
-2. `./socialnet` auto : Docker si dispo, sinon local
-3. Image pré-buildée GHCR seulement
+### Décisions
 
-### Décision
-**Option 2** (`b6e7c60`, renforcé `54b7d12`) :
-- `up` → Docker si `docker info` OK, sinon local
-- `docker` / `local` explicites
-- venv : essais `venv` → `--copies` → `--without-pip` → `virtualenv`
-- messages d’erreur actionnables
+| Besoin | Choix | Commits |
+|--------|--------|---------|
+| Temps réel | WebSocket | `b943b2d` |
+| Images | Upload (+ validation renforcée plus tard) | `4d3b49e` |
+| Fil | Cursor `?before=` | `ee502e9` |
+| Recherche | Offset/limit + commande `more` | `446a722` |
 
 ### Résultat
-Sur la machine utilisateur, Docker a été détecté et utilisé.
-Le mode local reste le filet de secours.
+Messagerie et fil live ; posts multimédia ; navigation documentée (`213dc23`).
 
 ---
 
-## 3. `psycopg-binary==3.2.9` introuvable
+## Phase 2 — Tests et CI (2026-07-25)
 
-### Vu
-```
-No matching distribution found for psycopg-binary==3.2.9
-(versions dispo : 3.2.10 … 3.3.4)
-```
-
-### Pourquoi
-Version **épinglée** retirée de PyPI. Bloquait `pip install -r requirements.txt`
-même pour un usage **SQLite uniquement**.
+### Question
+Comment éviter de casser auth / posts / recherche C à chaque feature ?
 
 ### Options
-1. Bumper vers `3.2.13` (toujours obligatoire)
-2. Retirer des deps cœur ; installer en best-effort
-3. Extra optionnel `requirements-postgres.txt`
+1. Tests manuels seulement  
+2. Pytest backend + tests unitaires C + GitHub Actions  
 
 ### Décision
-**Option 2** (`6ac973a`) : retiré de `requirements.txt` ;
-installé en option dans le script (`|| true`).
-SQLite = défaut, Postgres = optionnel.
+**Option 2** — PRs `#1` (pagination), `#2` (tests), `#3` (CI).
+
+| Commit | Rôle |
+|--------|------|
+| `1200d57` | Tests extension C |
+| `adfe0fd` | Suite API (auth, posts, social, search) |
+| `d3c0b5d` | Workflow Actions : build C + pytest |
 
 ### Résultat
-Install local/Docker des deps cœur OK.
+Filet de sécurité automatisé sur `main`.
 
 ---
 
-## 4. Build Docker — timeout réseau pip
+## Phase 3 — Profil, édition, notifications (2026-07-25)
 
-### Vu
-Premier build : `ReadTimeoutError` sur `files.pythonhosted.org`
-(téléchargement lent de wheels, ex. pillow).
+### Questions
+- Bio / édition de posts sans laisser d’index C orphelin ?
+- Comment notifier like / follow / message / commentaire ?
 
-### Pourquoi
-Réseau utilisateur lent / instable vers PyPI pendant le build.
-
-### Options
-1. Retry manuel (souvent suffisant)
-2. Miroirs / cache BuildKit
-3. Image GHCR pré-construite (`ghcr.io/lion9el/r-790`)
-
-### Décision
-Retry : le **deuxième** build a réussi (layers cachées ensuite).
+### Décisions
+- `bio` → `PATCH /api/me` (`7da9306`)
+- Edit/delete posts & comments **avec désindexation** (`8acd02a`, PR `#5`)
+- Notifications persistées + push WS (`7d50753`, PR `#6`)
 
 ### Résultat
-Image `socialnet-socialnet:latest` construite et saine.
+Parcours utilisateur plus riche ; recherche C cohérente après suppression.
 
 ---
 
-## 5. Port 8000 déjà alloué
+## Phase 4 — Durcissement sécurité (2026-07-25) — PR `#7`
 
-### Vu
-```
-Bind for 0.0.0.0:8000 failed: port is already allocated
-```
-`docker ps` → `docker-web-1` (PHP) sur `0.0.0.0:8000` depuis 10 jours.
+### Question (audit)
+Qu’est-ce qui ferait tomber une démo exposée ?
 
-### Pourquoi
-Autre projet légitime de l’utilisateur. Ne pas le tuer.
+### Vu / risques
+- Secret JWT faible ou codé en dur  
+- Token WebSocket dans l’URL (logs, historique)  
+- Upload image sans validation du contenu réel  
+- Brute-force login/register  
+- Écoute `0.0.0.0` par défaut  
+- Dépendances non figées  
 
-### Options
-1. Arrêter `docker-web` (invasif)
-2. Changer le port SocialNet (8080, 9000, …)
-3. Host network (sale sous Docker Desktop)
+### Décisions
 
-### Décision
-**Option 2** (`1f7471d`) : `ports: "${PORT:-8000}:8000"` dans compose.
-Usage : `PORT=9000 ./socialnet`.
-
-### Résultat intermédiaire
-- `PORT=8080` → erreur Docker Desktop `/forwards/expose … 500` (proxy WSL)
-- `PORT=9000` → **OK**
-
-### Résultat final
-```
-Container socialnet-socialnet-1 … healthy
-curl http://127.0.0.1:9000/ → 200
-```
-
----
-
-## 6. Comptes disparus sous Docker
-
-### Vu
-« Je n’ai plus accès à mon dernier compte. »
-
-### Pourquoi
-| Mode | Base |
-|------|------|
-| Local | `backend/socialnet.db` sur le disque |
-| Docker | Volume nommé `socialnet-data` (vide au 1er run) |
-
-### Options
-1. Rester en local
-2. Copier manuellement le `.db` dans le volume
-3. Import automatique au démarrage Docker
-
-### Décision
-**Option 3** (`30cd80d`) : `_import_local_db_to_docker` copie
-`backend/socialnet.db` (+ uploads) vers le volume, puis `compose restart`.
+| Fix | Commit |
+|-----|--------|
+| Secret JWT externalisé | `b1fe4c9` |
+| Auth WS sans token dans l’URL | `8639a34` |
+| Magic bytes / Pillow sur images | `7cc3f92` |
+| Rate limit login/register | `dbbbe6f` |
+| Pin des versions pip | `3b4e03c` |
+| Bind local par défaut | `3fb665e` |
+| Doc sécurité | `43c0014` |
 
 ### Résultat
-Import auto confirmé par l’utilisateur (« l’auto a fonctionné »).
+Socle sécurité minimal crédible pour une démo.
 
 ---
 
-## 7. Bots / IA invisibles
+## Phase 5 — Hashtags, mentions, WS robuste (2026-07-25)
 
-### Vu
-« Je ne vois plus les IA agir. »
+### Décisions
+- `#tag` / `@user` parsés côté serveur (`e830659`)
+- Reconnexion auto WebSocket côté front (`088d526`)
 
-### Pourquoi (plusieurs couches)
-1. **Image Docker = API seule** (pas de `runtime.py` dedans)
-2. `bots/.env` n’avait que le **placeholder** `gsk_xxxx…`
-3. Sans vraie clé → « Bots ignorés »
-4. Même avec clé, il faut `SOCIALNET_URL` = port réel (**9000**, pas 8000)
+### Résultat
+Conversation plus « réseau » ; clients moins fragiles aux coupures.
+
+---
+
+## Phase 6 — Révocation JWT (logout réel)
+
+### Question
+Un « logout » purement navigateur laisse un JWT volé valable jusqu’à expiration. Acceptable ?
 
 ### Options
-1. Embarquer les bots dans l’image (alourdit, secrets dans l’image)
-2. Lancer les bots **sur l’hôte**, pointés vers l’API Docker
-3. Service Compose `bots` séparé
+1. TTL court seulement  
+2. Liste de révocation + invalidation globale  
 
 ### Décision
-**Option 2** : `_start_bots` après API up ; source `bots/.env` ;
+**Option 2** :
+- `jti` + `iat` / `iat_ms` dans le JWT  
+- `POST /api/logout` (session)  
+- `POST /api/logout/all` (`tokens_valid_after`)  
+- Tests dédiés (`test_token_revocation.py`)
+
+### Bug découvert en route
+Comparaison à la **seconde** Unix révoquait un jeton émis *après* un `logout/all` dans la même seconde (tests rapides). Corrigé via `iat_ms`.
+
+### Résultat
+Logout serveur réel ; commandes terminal `logout` / `logout-all`.
+
+---
+
+## Phase 7 — Compte, modération, RGPD, profil enrichi
+
+### Questions
+- Reset mot de passe, suppression de compte, export données ?
+- Bloquer / signaler / bookmark / compte privé ?
+
+### Décision
+Livrer les « indispensables » produit avant de scaler l’infra :
+services `account`, `moderation`, schémas, tests (`fd9783e` et suite).
+
+### Résultat
+Parcours compte + modération de base documentés dans le README.
+
+---
+
+## Phase 8 — Bots IA autonomes
+
+### Question
+Peut-on peupler le réseau avec des agents qui **réfléchissent**, postent,
+écrivent dans un « monde » fichier, sans supervision constante ?
+
+### Décisions
+- Runtime multi-thread : `@nova`, `@echo`, `@orbit`  
+- LLM via **Groq** (Gemini optionnel) — clés dans `bots/.env` (gitignored)  
+- Mémoire SQLite `bots/memory/memory.db`  
+- Actions structurées (`write_repo`, etc.)  
+- Budget tokens configurable (défaut **illimité** pour ne pas couper la démo)  
+- Sync / blackboard / anti-boucle / retry rate-limit  
+
+Commits repères : `440d2e0`, `0fc83a6`, `f25dfb0`, `f4edbb4`, `6a7ac65`, `c479a90`, `2851471`…
+
+### Résultat
+Trois personas en ligne dès qu’une vraie `GROQ_API_KEY` est fournie.
+
+---
+
+## Phase 9 — Chronique réseau → monde
+
+### Question
+Comment les bots « savent » ce qui se passe sur le fil de façon cohérente ?
+
+### Décision
+`bots/chronicle.py` : lit le fil → `bots/world/journal/YYYY-MM-DD.md`  
+(+ push `socialnet-world` si `GITHUB_TOKEN`).  
+Les bots injectent la chronique dans leur contexte (`74340eb`).
+
+### Résultat
+Pont **API sociale → mémoire narrative** pour les agents.
+
+---
+
+## Phase 10 — Modularisation, Docker, ops
+
+### Questions
+- `app.py` trop monolithe ?
+- Comment déployer sans « ça marche sur ma machine » ?
+- SQLite suffit-il ? Et les backups ?
+
+### Décisions
+
+| Sujet | Choix | Commits |
+|-------|--------|---------|
+| Code | Services (`account`, `moderation`, `images`, `ops`, `backup`…) | `4d5eb1e`, … |
+| Config | `config.py` centralisé | `5149003` |
+| Conteneur | Dockerfile multi-stage, user non-root | `4d5eb1e` |
+| Backups + `/ops` | Phase 2 | `8d93bc9` |
+| Postgres live | `DATABASE_URL` + dual engine | `5675220` |
+| CI deploy | GHCR + SSH optionnel | `25048a7`, `248d206`, `41aad87` |
+
+### Résultat
+Chemin prod : image GHCR, compose, dashboard ops, Postgres optionnel.
+
+### Correctifs post-phases
+Bugs Postgres, privacy, index, search, backups SQLite, parcours utilisateur,
+PYTHONPATH Docker, restes sécu (`2f47afc`, `4872ca1`, `1605fa8`, `3dfc668`, `b70b6a5`).
+
+---
+
+## Phase 11 — Point d’entrée unique `./socialnet` (2026-08-07)
+
+### Question
+Trop de façons de lancer (`run.sh`, `start-all.sh`, docker, manuel) → confusion.
+
+### Décision
+`e11b542` — **une** commande `./socialnet` (up / api / stop / status / logs).  
+`run.sh` et `start-all.sh` deviennent des alias.
+
+### Résultat
+Surface d’entrée unifiée… mais le script installait encore via `pip` système.
+
+---
+
+## Phase 12 — Session stabilisation machine réelle (2026-08-07)
+
+Contexte : WSL `/mnt/d/socialnet`, Python géré (PEP 668), Docker Desktop,
+**autre stack déjà sur :8000**.
+
+### 12.1 PEP 668
+
+**Vu** : `externally-managed-environment`.
+
+**Options** : `--break-system-packages` / venv / Docker only.
+
+**Décision** : `.venv` auto (`9d00aaf`), puis fallbacks copies / without-pip (`54b7d12`).
+
+### 12.2 Zéro friction
+
+**Question** : « Lancer doit être simple, sans tracas. »
+
+**Décision** : Docker prioritaire si dispo, sinon local (`b6e7c60`).
+
+### 12.3 psycopg 3.2.9 disparu de PyPI
+
+**Vu** : pin introuvable alors que SQLite suffit.
+
+**Décision** : psycopg **optionnel** (`6ac973a`).
+
+### 12.4 Build Docker / réseau
+
+**Vu** : timeout pip sur wheels.
+
+**Décision** : retry ; cache BuildKit ensuite OK.
+
+### 12.5 Port 8000 pris
+
+**Vu** : `docker-web-1` (PHP) sur 8000.
+
+**Options** : tuer l’autre projet / changer de port.
+
+**Décision** : `PORT` configurable (`1f7471d`).  
+8080 → erreur proxy Docker Desktop WSL ; **9000** → OK, HTTP 200.
+
+### 12.6 Comptes « perdus »
+
+**Pourquoi** : volume Docker vide ≠ `backend/socialnet.db` local.
+
+**Décision** : import auto DB + uploads vers le volume (`30cd80d`).
+
+**Résultat** : comptes restaurés.
+
+### 12.7 Bots invisibles
+
+**Pourquoi** :
+1. Image Docker = API seule  
+2. `bots/.env` avec placeholder `gsk_xxxx…`  
+3. `SOCIALNET_URL` doit viser le **vrai** port (9000)
+
+**Décision** : bots sur l’hôte, clé réelle dans `bots/.env` (gitignored),
 rejet des placeholders (`30cd80d`, `387d3ec`).
 
-Clé réelle retrouvée dans `~/.bash_history` de l’utilisateur
-(pas dans le venv — les venv ne stockent pas de secrets).
+**Résultat** : `@nova` `@echo` `@orbit` en ligne.
 
-### Résultat
-```
-✓ @nova en ligne
-✓ @echo en ligne
-✓ @orbit en ligne
-💭 réflexions + write_repo …
-```
+### 12.8 Documentation
+
+README + bots/README alignés ; chronique complète ; CHANGELOG (`f6afd97`).
 
 ---
 
-## 8. Intégration « définitive » des API
-
-### Pourquoi
-Éviter de retaper clé + commandes à chaque session.
-
-### Décision
-- Clé **uniquement** dans `bots/.env` (gitignored)
-- `./socialnet` charge la clé, démarre les bots si valide
-- Documentation à jour (README, bots/README, cette chronique)
-
-### Non-décision volontaire
-Ne **jamais** committer `GROQ_API_KEY` dans le dépôt.
-
----
-
-## 9. Chronologie des commits de la session
-
-| Commit | Résumé |
-|--------|--------|
-| `9d00aaf` | venv local anti-PEP 668 |
-| `b6e7c60` | Docker prioritaire, fallback local, doc lancement |
-| `54b7d12` | venv plus robuste (copies / without-pip / virtualenv) |
-| `6ac973a` | psycopg optionnel |
-| `1f7471d` | `PORT` configurable dans compose |
-| `30cd80d` | import base locale → Docker + bots en mode Docker |
-| `387d3ec` | bots : clé réelle, source `.env`, venv |
-
----
-
-## 10. État final validé (machine utilisateur)
+## Timeline synthétique
 
 ```text
-API Docker     : http://127.0.0.1:9000  (healthy, HTTP 200)
-Base           : ancienne socialnet.db importée dans le volume
-Bots           : nova / echo / orbit en ligne (Groq)
-Autre projet   : docker-web intact sur :8000
-Commande type  : PORT=9000 ./socialnet
+2026-07-24  Naissance : cœur social + recherche C
+2026-07-25  WS, images, pagination, tests, CI
+            Sécurité (JWT, upload, rate limit, bind)
+            Hashtags, mentions, logout serveur
+            Compte / modération / RGPD
+            Bots IA + mémoire + sync
+…           Chronique monde, modularisation, Docker, /ops
+            Postgres optionnel, CI deploy, correctifs
+2026-08-07  ./socialnet unique
+            Session terrain : venv, Docker, PORT, import DB, bots
 ```
 
 ---
 
-## 11. Leçons retenues
+## État actuel (validé)
 
-1. **Une commande** doit gérer Docker **et** local, sans sudo obligatoire.
-2. Les deps **optionnelles** (Postgres) ne doivent pas bloquer le chemin nominal (SQLite).
-3. Sous WSL, le proxy de ports Docker peut échouer sur certains ports → essayer un autre `PORT`.
-4. Docker ≠ même disque que le mode local → prévoir **migration de données**.
-5. Les bots sont un **process hôte** tant que l’image ne les embarque pas ; la clé vit dans `bots/.env`.
-6. Documenter le **pourquoi** évite de rejouer les mêmes erreurs.
+| Composant | État |
+|-----------|------|
+| API | Docker healthy (ex. `:9000` si `:8000` pris) |
+| Données | SQLite ; import depuis `backend/socialnet.db` local |
+| Front | Terminal CRT sur `/` |
+| Ops | `/ops` |
+| Bots | Hôte + `GROQ_API_KEY` réelle dans `bots/.env` |
+| Lancement | `PORT=9000 ./socialnet` |
 
 ---
 
-## 12. Suite possible (hors scope de cette session)
+## Principes retenus sur toute la vie du projet
 
-- Service Compose `bots` avec secret file / env
-- Healthcheck bots dans `/ops`
-- Image GHCR comme chemin par défaut (`docker pull` sans build local)
-- Régénération périodique des clés API exposées dans l’historique shell
+1. **Main stable** — features par PR / commits atomiques, tests quand le risque est élevé.  
+2. **Sécurité progressive** — d’abord le cœur, puis audit et durcissement.  
+3. **SQLite d’abord** — Postgres en option, jamais un bloqueur du chemin nominal.  
+4. **Une porte d’entrée** — `./socialnet` plutôt que cinq scripts divergents.  
+5. **Secrets hors git** — `.env` / `bots/.env` gitignored.  
+6. **Documenter le pourquoi** — pour ne pas rejouer les mêmes erreurs.
+
+---
+
+## Annexe — commits session 2026-08-07
+
+| Hash | Résumé |
+|------|--------|
+| `e11b542` | Point d’entrée `./socialnet` |
+| `9d00aaf` | Venv anti-PEP 668 |
+| `b6e7c60` | Docker prioritaire |
+| `54b7d12` | Venv robuste |
+| `6ac973a` | psycopg optionnel |
+| `1f7471d` | `PORT` configurable |
+| `30cd80d` | Import DB + bots Docker |
+| `387d3ec` | Clé bots réelle / source env |
+| `f6afd97` | Docs + chronique (version courte session) |
+
+*Chronique à jour : du commit `8796521` (création) à l’état courant du dépôt.*
