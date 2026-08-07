@@ -11,7 +11,7 @@ services:
   socialnet:
     build: .
     ports:
-      - "8000:8000"
+      - "${PORT:-8000}:8000"
     environment:
       - SOCIALNET_SECRET=${SOCIALNET_SECRET:-change-moi-avant-la-production}
       - SOCIALNET_BACKUP_DIR=/app/backups
