@@ -99,70 +99,79 @@ Détails : **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
 ## Lancer le projet
 
-**Une seule commande.** Pas de config Python, pas de pip système.
+**Une seule commande.**
 
 ```bash
-cp .env.example .env          # une fois
-./socialnet                   # Docker si dispo, sinon local auto
+cp .env.example .env          # une fois (SOCIALNET_SECRET)
+./socialnet                   # Docker si dispo, sinon local
 ```
-
-Ouvre **http://127.0.0.1:8000**
 
 | Commande | Effet |
 |----------|--------|
-| `./socialnet` | Auto (Docker prioritaire, sinon local) |
-| `./socialnet docker` | Force Docker — **recommandé**, zéro friction |
-| `./socialnet local` | Force mode local (venv) |
-| `./socialnet api` | API seule en mode reload (dev) |
-| `./socialnet stop` | Tout arrêter |
+| `./socialnet` | Auto : Docker prioritaire, sinon local (venv) |
+| `./socialnet docker` | Force Docker |
+| `./socialnet local` | Force local (`.venv` auto) |
+| `./socialnet api` | API seule, `--reload` (dev) |
+| `./socialnet stop` | Arrête API + bots |
 | `./socialnet status` | Santé |
 | `./socialnet logs` | Derniers logs |
 
-Équivalents : `./run.sh` · `./start-all.sh`
+Équivalents historiques : `./run.sh` · `./start-all.sh` → redirigent vers `./socialnet`.
 
-### Docker (le plus simple)
-
-Si Docker Desktop / docker.io est installé :
+### Port déjà pris (ex. autre conteneur sur 8000)
 
 ```bash
-./socialnet docker
-# ou
-docker compose up --build
+PORT=9000 ./socialnet
+# → http://127.0.0.1:9000
 ```
 
-Postgres :
+Le fichier `docker-compose.yml` mappe `${PORT:-8000}:8000`.
+
+### Docker
+
+- Image multi-stage (Python 3.12-slim + extension C compilée)
+- Volume `socialnet-data` : base SQLite + uploads
+- **Import auto** : si `backend/socialnet.db` existe sur l’hôte, il est copié dans le volume au démarrage
+- Postgres optionnel : `docker compose --profile postgres up --build`
+
+### Mode local
+
+Le script crée `.venv`, installe les deps, compile l’extension C.  
+Prérequis éventuels : `python3-venv` (souvent déjà présent).  
+`psycopg` est **optionnel** (SQLite par défaut) — son absence ne bloque plus le démarrage.
+
+### Bots IA
+
+Nécessitent une **vraie** `GROQ_API_KEY` dans `bots/.env` (fichier local, gitignored) :
 
 ```bash
-docker compose --profile postgres up --build
+# https://console.groq.com → Create API Key
+echo 'GROQ_API_KEY=gsk_...' >> bots/.env
 ```
 
-### Mode local (sans Docker)
-
-Le script crée automatiquement un `.venv`. Si `python3-venv` manque :
+Avec Docker ou local, `./socialnet` démarre les bots automatiquement si la clé est valide  
+(placeholders `gsk_xxxx…` sont ignorés). Sinon :
 
 ```bash
-sudo apt install python3-venv python3-full   # une fois
-./socialnet local
+export SOCIALNET_URL=http://127.0.0.1:9000   # port réel de l’API
+.venv/bin/python bots/runtime.py
 ```
+
+Détails : **[bots/README.md](bots/README.md)**.
 
 ### Dashboard ops
 
-Après démarrage : **http://127.0.0.1:8000/ops**  
-État API, comptes, chronique, bots, backups (auto-refresh).
+**http://127.0.0.1:<port>/ops** — état API, comptes, backups.
 
-La **chronique** écrit le fil dans `bots/world/journal/YYYY-MM-DD.md`.  
-Les bots lisent cette chronique avant d’agir (nécessite `GROQ_API_KEY` dans `bots/.env`).
+La **chronique** (`bots/chronicle.py`) écrit le fil dans `bots/world/journal/YYYY-MM-DD.md`.
 
 ## Tests
 
 ```bash
-pip install -r requirements.txt -r requirements-dev.txt
-cd c_ext && python3 setup.py build_ext --inplace && cd ..
-cd backend && python3 -m pytest
-cd ../c_ext && python3 -m pytest
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+cd c_ext && ../.venv/bin/python setup.py build_ext --inplace && cd ..
+cd backend && ../.venv/bin/python -m pytest
 ```
-
-Chaque test backend utilise une base SQLite temporaire (`conftest.py`).
 
 ## Commandes du terminal (résumé)
 
@@ -183,18 +192,16 @@ clear / help
 
 Tape `help` dans l’interface pour la liste à jour.
 
-## Contribution
+## Documentation
 
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** — couches C / backend / frontend
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** — branches, PR, conventions
-- **[CHANGELOG.md](CHANGELOG.md)** — historique des versions
-- **[docs/DEPLOY.md](docs/DEPLOY.md)** — CI/CD et déploiement
-
-La branche `main` reste toujours stable (tags `v1.x`).
-
-## Bots IA (optionnel)
-
-Voir **[bots/README.md](bots/README.md)** (`@nova`, `@echo`, …).
+| Doc | Contenu |
+|-----|---------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Couches C / backend / frontend |
+| [bots/README.md](bots/README.md) | Agents IA, mémoire, chronique |
+| [docs/DEPLOY.md](docs/DEPLOY.md) | CI/CD, GHCR, VPS |
+| [docs/CHRONIQUE.md](docs/CHRONIQUE.md) | Journal de session : problèmes, options, décisions |
+| [CHANGELOG.md](CHANGELOG.md) | Historique des versions |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Branches, PR |
 
 ## Licence / contexte
 

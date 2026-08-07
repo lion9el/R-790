@@ -5,6 +5,27 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
+## [Non publié] — 2026-08-07 : lancement robuste (session stabilisation)
+
+### Ajouté
+- `./socialnet` : Docker prioritaire, fallback local, commandes `docker` / `local`
+- Virtualenv `.venv` auto (anti PEP 668)
+- Port hôte configurable : `PORT=9000 ./socialnet` (`docker-compose.yml`)
+- Import auto de `backend/socialnet.db` (+ uploads) vers le volume Docker
+- Démarrage bots en mode Docker si vraie `GROQ_API_KEY` dans `bots/.env`
+- `docs/CHRONIQUE.md` — journal décisions / options / résultats
+
+### Modifié
+- `requirements.txt` : `psycopg` retiré des deps obligatoires (SQLite par défaut)
+- README + `bots/README.md` alignés sur le comportement réel
+
+### Corrigé
+- Échec `pip` système (externally-managed-environment)
+- Pin `psycopg-binary==3.2.9` introuvable sur PyPI
+- Bots ignorés si clé placeholder `gsk_xxxx…`
+
+Voir **[docs/CHRONIQUE.md](docs/CHRONIQUE.md)** pour le récit complet.
+
 ## [Non publié] — mises à jour automatiques
 
 - Dependabot : pip, github-actions, docker (hebdo)
