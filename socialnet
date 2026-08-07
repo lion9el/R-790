@@ -130,28 +130,38 @@ _ensure_venv() {
   fi
 
   echo "→ Création du virtualenv (.venv)…"
+  rm -rf "$VENV_DIR" 2>/dev/null || true
+
+  local ok=0
   if python3 -m venv "$VENV_DIR" 2>/dev/null; then
-    :
-  elif python3 -m venv "$VENV_DIR" --without-pip 2>/dev/null; then
-    echo "  (bootstrap pip…)"
-    curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV_DIR/bin/python" -q
-  else
+    ok=1
+  elif python3 -m venv --copies "$VENV_DIR" 2>/dev/null; then
+    ok=1
+  elif python3 -m venv --without-pip "$VENV_DIR" 2>/dev/null; then
+    ok=1
+  elif python3 -m virtualenv "$VENV_DIR" 2>/dev/null; then
+    ok=1
+  fi
+
+  if [[ "$ok" -ne 1 || ! -x "$VENV_DIR/bin/python" ]]; then
     echo ""
     echo "✗ Impossible de créer un virtualenv."
     echo ""
     echo "  Solutions (une seule suffit) :"
-    echo "  1. Docker (recommandé, zéro dépendance Python) :"
-    echo "       ./socialnet docker"
-    echo "  2. Installer le paquet manquant :"
-    echo "       sudo apt install python3-venv python3-full"
-    echo "  3. Ou : python3 -m pip install --user virtualenv"
-    echo "       puis : python3 -m virtualenv .venv && ./socialnet local"
+    echo "  1. Docker (recommandé) :  ./socialnet docker"
+    echo "  2. sudo apt install python3-venv python3-full"
+    echo "  3. python3 -m pip install --user virtualenv && python3 -m virtualenv .venv"
     echo ""
     exit 1
   fi
 
   PYTHON="$VENV_DIR/bin/python"
   PIP="$VENV_DIR/bin/pip"
+  if [[ ! -x "$PIP" ]]; then
+    echo "  (bootstrap pip…)"
+    curl -sS https://bootstrap.pypa.io/get-pip.py | "$PYTHON" -q
+    PIP="$VENV_DIR/bin/pip"
+  fi
   "$PIP" install -q --upgrade pip setuptools wheel >/dev/null 2>&1 || true
 }
 
