@@ -194,14 +194,16 @@ Tape `help` dans l’interface pour la liste à jour.
 
 ## Documentation
 
+Index : **[docs/README.md](docs/README.md)**
+
 | Doc | Contenu |
 |-----|---------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Couches C / backend / frontend |
-| [bots/README.md](bots/README.md) | Agents IA, mémoire, chronique |
-| [docs/DEPLOY.md](docs/DEPLOY.md) | CI/CD, GHCR, VPS |
-| [docs/CHRONIQUE.md](docs/CHRONIQUE.md) | Journal de session : problèmes, options, décisions |
-| [CHANGELOG.md](CHANGELOG.md) | Historique des versions |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Branches, PR |
+| [bots/README.md](bots/README.md) | Agents IA |
+| [docs/CHRONIQUE.md](docs/CHRONIQUE.md) | Histoire complète du projet |
+| [docs/DEPLOY.md](docs/DEPLOY.md) | CI/CD, VPS |
+| [CHANGELOG.md](CHANGELOG.md) | Versions |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | PR / conventions |
 
 ## Licence / contexte
 

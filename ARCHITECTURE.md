@@ -5,30 +5,56 @@ Comment les couches s’articulent. À lire avant de modifier le code.
 ## Vue d’ensemble
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Navigateur (frontend/index.html)                            │
-│  Terminal web CRT — commandes texte → JSON                   │
-└───────────────────────┬─────────────────────────────────────┘
-                        │  HTTP/JSON + WebSocket
-                        ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Backend FastAPI                                             │
-│  app.py          routes + middleware sécurité + lifespan     │
-│  services/       logique métier découpée                     │
-│  auth / config   JWT, PBKDF2, settings                       │
-│  deps / schemas  dépendance auth, modèles Pydantic           │
-└──────────┬───────────────────────────────┬──────────────────┘
-           │                               │
-           ▼                               ▼
-┌────────────────────────┐    ┌───────────────────────────────┐
-│ SQLite (schema.sql)     │    │ Extension C (searchmodule.c)   │
-│ users, posts, likes,    │    │ Index inversé en mémoire       │
-│ comments, follows,      │    │ index_add / search / clear     │
-│ messages, notifications │    │ + normalisation Unicode Python │
-│ blocks, reports,        │    └───────────────────────────────┘
-│ bookmarks, follow_req,  │
-│ password_reset_tokens…  │
-└────────────────────────┘
+Navigateur ──HTTP/WS──► FastAPI (backend/) ──► SQLite / Postgres
+                              │
+                              ├── services/   métier
+                              ├── auth, deps  sécurité
+                              └── c_ext/      recherche full-text
+                              
+./socialnet ──► Docker (API) ou local (.venv)
+                    │
+                    └── bots/runtime.py (hôte, GROQ_API_KEY)
+                              │
+                              ├── memory/     SQLite agents
+                              └── world/      journal chronique
+```
+
+## Arborescence du dépôt
+
+```
+R-790/
+├── socialnet                 # Point d’entrée UNIQUE
+├── run.sh / start-all.sh     # Alias → socialnet
+├── README.md                 # Démarrage + fonctionnalités
+├── ARCHITECTURE.md           # Ce fichier
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── Dockerfile
+├── docker-compose.yml        # Dev / local Docker (port hôte 9000)
+├── docker-compose.prod.yml
+├── requirements.txt          # API (SQLite)
+├── requirements-dev.txt      # pytest
+├── backend/
+│   ├── app.py                # Routes FastAPI
+│   ├── auth.py, config.py, database.py, deps.py, schemas.py
+│   ├── ratelimit.py, realtime.py
+│   ├── schema.sql / schema.postgres.sql
+│   ├── services/             # account, moderation, images, backup, ops, common
+│   ├── tests/
+│   └── uploads/
+├── c_ext/                    # Extension C searchengine
+├── frontend/index.html       # Terminal CRT
+├── bots/                     # Agents IA (hors image Docker)
+│   ├── runtime.py, agents.py, chronicle.py
+│   ├── identities/, personalities/, memory/, world/
+│   └── README.md
+├── docs/
+│   ├── README.md             # Index documentation
+│   ├── CHRONIQUE.md          # Histoire du projet
+│   ├── DEPLOY.md
+│   └── ARCHITECTURE_AGENTS.md
+├── scripts/                  # backup, update-server
+└── .github/workflows/        # tests, deploy, bots-check, weekly-image
 ```
 
 ## Principes
