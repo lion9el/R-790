@@ -183,3 +183,13 @@ docker run -d --name watchtower \
 | Patch image de base | Weekly workflow | Image + VPS à jour |
 | Ton code sur `main` | Deploy workflow | Image + VPS à jour |
 | Cron / Watchtower | VPS | Filet si Actions indispo |
+
+
+## Sécurité ops & reset mdp
+
+| Variable | Effet |
+|----------|--------|
+| `SOCIALNET_EXPOSE_RESET_TOKEN=1` | Renvoie le token de reset dans le JSON (démo terminal uniquement) |
+| `SOCIALNET_OPS_KEY=...` | Exige l'en-tête `X-Ops-Key` pour `POST /api/ops/backup` |
+
+Sans ces variables : reset ne divulgue pas le token ; backup reste accessible à tout utilisateur authentifié (pratique en dev).

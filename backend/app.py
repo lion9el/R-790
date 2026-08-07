@@ -1077,11 +1077,20 @@ def change_password(body: ChangePasswordIn, user=Depends(get_current_user)):
 
 @app.post("/api/account/reset-request", dependencies=[Depends(rate_limit(3, 300))])
 def reset_request(body: ResetRequestIn):
+    """Demande de reset. Le token n'est renvoyé dans le JSON que si
+    SOCIALNET_EXPOSE_RESET_TOKEN=1 (démo terminal). En prod : email uniquement.
+    """
+    import os
     token = account_service.request_password_reset(body.username)
-    # En prod : envoyer par email. Ici on renvoie le token pour le terminal demo.
-    if token is None:
-        return {"ok": True, "detail": "Si le compte existe, un jeton a été créé."}
-    return {"ok": True, "token": token, "detail": "Jeton valable 1h (demo : affiché ici au lieu d'un email)."}
+    # Toujours la même réponse publique (ne révèle pas si le compte existe)
+    expose = os.environ.get("SOCIALNET_EXPOSE_RESET_TOKEN", "").strip().lower() in ("1", "true", "yes")
+    if expose and token:
+        return {
+            "ok": True,
+            "token": token,
+            "detail": "Jeton valable 1h (mode démo SOCIALNET_EXPOSE_RESET_TOKEN).",
+        }
+    return {"ok": True, "detail": "Si le compte existe, un jeton de réinitialisation a été créé."}
 
 
 @app.post("/api/account/reset-confirm", dependencies=[Depends(rate_limit(5, 300))])
@@ -1197,8 +1206,15 @@ def ops_status():
 
 
 @app.post("/api/ops/backup")
-def ops_backup(user=Depends(get_current_user)):
-    """Déclenche un snapshot immédiat (authentifié)."""
+def ops_backup(
+    user=Depends(get_current_user),
+    x_ops_key: str | None = Header(default=None, alias="X-Ops-Key"),
+):
+    """Snapshot immédiat. Si SOCIALNET_OPS_KEY est défini, exige l'en-tête X-Ops-Key."""
+    import os
+    required = os.environ.get("SOCIALNET_OPS_KEY", "").strip()
+    if required and (x_ops_key or "") != required:
+        raise HTTPException(status_code=403, detail="Clé ops invalide ou manquante (X-Ops-Key).")
     return backup_service.run_backup()
 
 

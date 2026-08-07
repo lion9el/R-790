@@ -53,8 +53,20 @@ def test_privacy_form_string_true(client, register):
     assert r.json()["is_private"] is False
 
 
-def test_backup_works(client, register):
+def test_backup_works(client, register, monkeypatch):
+    # Sans SOCIALNET_OPS_KEY : tout user auth peut déclencher un backup (dev)
+    monkeypatch.delenv("SOCIALNET_OPS_KEY", raising=False)
     h, _ = register("BackupUser")
     r = client.post("/api/ops/backup", headers=h)
+    assert r.status_code == 200
+    assert r.json().get("db") is True
+
+
+def test_backup_requires_ops_key_when_set(client, register, monkeypatch):
+    monkeypatch.setenv("SOCIALNET_OPS_KEY", "secret-ops")
+    h, _ = register("BackupUser2")
+    r = client.post("/api/ops/backup", headers=h)
+    assert r.status_code == 403
+    r = client.post("/api/ops/backup", headers={**h, "X-Ops-Key": "secret-ops"})
     assert r.status_code == 200
     assert r.json().get("db") is True

@@ -28,7 +28,8 @@ def test_change_password(client):
     assert r3.status_code == 200
 
 
-def test_password_reset_flow(client):
+def test_password_reset_flow(client, monkeypatch):
+    monkeypatch.setenv("SOCIALNET_EXPOSE_RESET_TOKEN", "1")
     _reg(client, "bob_reset")
     r = client.post("/api/account/reset-request", json={"username": "bob_reset"})
     assert r.status_code == 200

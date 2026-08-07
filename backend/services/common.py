@@ -51,6 +51,8 @@ def create_notification(
     from_username: str,
     post_id: int | None = None,
     content: str | None = None,
+    *,
+    do_commit: bool = True,
 ) -> dict[str, Any]:
     created_at = now()
     cur = conn.execute(
@@ -58,7 +60,8 @@ def create_notification(
         "VALUES (?, ?, ?, ?, ?, ?)",
         (user_id, ntype, from_username, post_id, content, created_at),
     )
-    conn.commit()
+    if do_commit:
+        conn.commit()
     return {
         "id": cur.lastrowid,
         "type": ntype,
