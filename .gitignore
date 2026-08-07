@@ -59,3 +59,6 @@ bots/socialnet-world-clone/
 backups/
 .run-*.log
 *.bak
+====
+# Runtime pids / venv
+.run/
