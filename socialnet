@@ -175,6 +175,8 @@ _install_deps() {
   echo "→ Dépendances Python…"
   "$PIP" install -q -r "$ROOT/requirements.txt" \
     || _die "Échec installation des dépendances"
+  # Postgres optionnel (SQLite par défaut — ne bloque pas le démarrage)
+  "$PIP" install -q "psycopg[binary]>=3.2.10" 2>/dev/null || true
   if [[ -f "$ROOT/bots/requirements-bots.txt" ]]; then
     "$PIP" install -q -r "$ROOT/bots/requirements-bots.txt" 2>/dev/null || true
   fi
