@@ -326,55 +326,96 @@ def confirm_action(action_id: int, admin_id: int) -> dict[str, Any]:
     "_push" du dict retourné — jamais persistée en DB — pour que l'appelant
     (route FastAPI, async) puisse faire le `await manager.send_to_user(...)`,
     ce que cette fonction ne peut pas faire elle-même (elle est synchrone,
-    comme le reste de l'accès DB dans ce module)."""
+    comme le reste de l'accès DB dans ce module).
+
+    Sûr en cas de double confirmation concurrente (deux admins qui cliquent
+    "confirmer" au même moment, ou confirm+reject simultanés) : voir le
+    commentaire sur `claim` ci-dessous — un seul appelant peut jamais
+    "gagner" une action donnée, quel que soit le timing.
+    """
     with get_conn() as conn:
-        row = conn.execute("SELECT * FROM agent_actions WHERE id = ?", (action_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Action introuvable.")
-        if row["status"] != "pending":
-            raise HTTPException(status_code=400, detail=f"Action déjà traitée (status={row['status']}).")
-
-        payload = json.loads(row["payload"])
-        result: dict[str, Any]
-        try:
-            result = _execute(row["action_type"], payload, reason=row["reason"])
-            status = "executed"
-        except HTTPException as e:
-            result = {"error": e.detail}
-            status = "failed"
-        except Exception as e:  # noqa: BLE001 - filet de sécurité volontaire :
-            # une erreur inattendue pendant l'exécution (contrainte DB,
-            # bug futur...) ne doit jamais faire planter la route en 500 ni
-            # laisser l'action bloquée en 'pending' : elle est marquée
-            # 'failed' avec le détail, un admin peut retenter ou investiguer.
-            result = {"error": f"{type(e).__name__}: {e}"}
-            status = "failed"
-
-        push = result.pop("_push", None)
-
-        conn.execute(
-            "UPDATE agent_actions SET status = ?, reviewed_by = ?, reviewed_at = ?, result = ? WHERE id = ?",
-            (status, admin_id, now(), json.dumps(result), action_id),
+        # Un simple "SELECT status puis, si pending, UPDATE" laisserait une
+        # fenêtre de course : deux requêtes concurrentes peuvent toutes les
+        # deux lire status='pending' AVANT que l'une des deux n'écrive, et
+        # exécuteraient alors l'action deux fois (ex: bannir, débannir, puis
+        # rebannir en double, ou pire, une notification envoyée deux fois).
+        # La parade : un UPDATE ATOMIQUE qui à la fois vérifie ET change le
+        # statut en une seule opération SQL (WHERE status = 'pending' fait
+        # partie de la condition d'écriture elle-même). SQLite sérialise les
+        # écritures (une seule transaction d'écriture active à la fois,
+        # voir busy_timeout dans database.py) : si deux connexions tentent
+        # ce même UPDATE en même temps, l'une attend que l'autre commit,
+        # relit alors l'état à jour, et son propre WHERE ne matche plus
+        # rien (rowcount=0) — un seul des deux appels peut "gagner" le
+        # claim, jamais les deux.
+        claim = conn.execute(
+            "UPDATE agent_actions SET status = 'processing' WHERE id = ? AND status = 'pending'",
+            (action_id,),
         )
         conn.commit()
-        out = {"id": action_id, "status": status, "result": result}
-        if push:
-            out["_push"] = push
-        return out
+        if claim.rowcount == 0:
+            row = conn.execute("SELECT status FROM agent_actions WHERE id = ?", (action_id,)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Action introuvable.")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Action déjà traitée ou en cours de traitement par un autre admin (status={row['status']}).",
+            )
+        row = conn.execute("SELECT * FROM agent_actions WHERE id = ?", (action_id,)).fetchone()
+
+    # Hors du `with` précédent, volontairement : `_execute` gère sa propre
+    # connexion/transaction. Le `finally` ci-dessous garantit qu'une action
+    # ne reste JAMAIS coincée en 'processing' — même si `_execute` lève
+    # quelque chose de complètement inattendu (jusqu'à une erreur d'infra)
+    # — en écrivant le statut final sur une connexion FRAÎCHE, indépendante
+    # de tout état incertain que l'exécution aurait pu laisser derrière elle.
+    payload = json.loads(row["payload"])
+    status = "failed"
+    result: dict[str, Any] = {"error": "Erreur interne inattendue pendant l'exécution."}
+    push: dict[str, Any] | None = None
+    try:
+        result = _execute(row["action_type"], payload, reason=row["reason"])
+        status = "executed"
+    except HTTPException as e:
+        result = {"error": e.detail}
+        status = "failed"
+    except Exception as e:  # noqa: BLE001 - filet de sécurité volontaire, voir docstring
+        result = {"error": f"{type(e).__name__}: {e}"}
+        status = "failed"
+    finally:
+        push = result.pop("_push", None) if isinstance(result, dict) else None
+        with get_conn() as conn2:
+            conn2.execute(
+                "UPDATE agent_actions SET status = ?, reviewed_by = ?, reviewed_at = ?, result = ? WHERE id = ?",
+                (status, admin_id, now(), json.dumps(result), action_id),
+            )
+            conn2.commit()
+
+    out = {"id": action_id, "status": status, "result": result}
+    if push:
+        out["_push"] = push
+    return out
 
 
 def reject_action(action_id: int, admin_id: int) -> dict[str, Any]:
+    """Même parade anti-course que `confirm_action` : le rejet est lui-même
+    un UPDATE atomique conditionné sur status='pending', pas un SELECT puis
+    UPDATE séparés."""
     with get_conn() as conn:
-        row = conn.execute("SELECT * FROM agent_actions WHERE id = ?", (action_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Action introuvable.")
-        if row["status"] != "pending":
-            raise HTTPException(status_code=400, detail=f"Action déjà traitée (status={row['status']}).")
-        conn.execute(
-            "UPDATE agent_actions SET status = 'rejected', reviewed_by = ?, reviewed_at = ? WHERE id = ?",
+        claim = conn.execute(
+            "UPDATE agent_actions SET status = 'rejected', reviewed_by = ?, reviewed_at = ? "
+            "WHERE id = ? AND status = 'pending'",
             (admin_id, now(), action_id),
         )
         conn.commit()
+        if claim.rowcount == 0:
+            row = conn.execute("SELECT status FROM agent_actions WHERE id = ?", (action_id,)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Action introuvable.")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Action déjà traitée ou en cours de traitement par un autre admin (status={row['status']}).",
+            )
         return {"id": action_id, "status": "rejected"}
 
 

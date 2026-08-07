@@ -251,3 +251,98 @@ def test_warn_user_creates_notification(client):
     assert r2.status_code == 200
     notifs = r2.json()
     assert any(n["type"] == "admin_warning" and "respecter" in n["content"] for n in notifs)
+
+
+def test_concurrent_confirm_executes_exactly_once(client):
+    """Preuve concrète (pas juste théorique) que la parade anti-course tient.
+
+    On appelle `agent_service.confirm_action` directement depuis de VRAIS
+    threads OS (pas via TestClient/HTTP) : la route /confirm est `async def`
+    (nécessaire pour le push websocket) et appelle du code synchrone
+    bloquant SANS le déporter dans un threadpool — ce qui sérialise de facto
+    les requêtes concurrentes sur la boucle d'événements et masquerait une
+    éventuelle course au niveau HTTP, sans rien prouver sur la vraie garantie
+    qui nous intéresse : l'atomicité de l'UPDATE SQL lui-même, indépendante
+    de la couche ASGI. Tester directement le service élimine ce facteur de
+    confusion.
+
+    On utilise propose_warn_user précisément parce que chaque exécution
+    laisse une trace observable (une notification supplémentaire) : si la
+    course n'était pas fermée, on verrait plusieurs notifications au lieu
+    d'une seule.
+    """
+    import concurrent.futures
+    import services.agent as agent_service
+
+    tok_admin = _reg(client, "oscar_agent")
+    _make_admin("oscar_agent")
+    tok_target = _reg(client, "paul_target")
+
+    with database.get_conn() as conn:
+        admin_id = conn.execute("SELECT id FROM users WHERE username = 'oscar_agent'").fetchone()["id"]
+        target_id = conn.execute("SELECT id FROM users WHERE username = 'paul_target'").fetchone()["id"]
+    action_id = agent_service._propose_action(
+        "warn_user",
+        {"user_id": target_id, "username": "paul_target", "message": "dernier avertissement"},
+        "récidive",
+        admin_id,
+    )
+
+    def _confirm():
+        try:
+            return agent_service.confirm_action(action_id, admin_id)
+        except Exception as e:  # HTTPException notamment (déjà traité/en cours)
+            return e
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: _confirm(), range(8)))
+
+    executed = [r for r in results if isinstance(r, dict) and r.get("status") == "executed"]
+    refused = [r for r in results if not isinstance(r, dict)]
+    assert len(executed) == 1, f"attendu exactement 1 exécution, obtenu {len(executed)} : {results}"
+    assert len(refused) == 7
+
+    # Preuve indépendante côté effet de bord : une seule notification créée,
+    # pas huit.
+    r_notifs = client.get("/api/notifications", headers=_auth(tok_target))
+    admin_warnings = [n for n in r_notifs.json() if n["type"] == "admin_warning"]
+    assert len(admin_warnings) == 1
+
+
+def test_concurrent_confirm_and_reject_only_one_wins(client):
+    """Même parade, testée directement au niveau service (voir docstring du
+    test précédent pour pourquoi pas via HTTP) : confirm et reject en vraie
+    concurrence sur la même action, un seul des deux doit l'emporter."""
+    import concurrent.futures
+    import services.agent as agent_service
+
+    tok_admin = _reg(client, "quinn_agent")
+    _make_admin("quinn_agent")
+
+    r = client.post("/api/posts", data={"content": "post en litige"}, headers=_auth(tok_admin))
+    post_id = r.json()["id"]
+
+    with database.get_conn() as conn:
+        admin_id = conn.execute("SELECT id FROM users WHERE username = 'quinn_agent'").fetchone()["id"]
+    action_id = agent_service._propose_action("delete_post", {"post_id": post_id}, "test course", admin_id)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        f_confirm = pool.submit(agent_service.confirm_action, action_id, admin_id)
+        f_reject = pool.submit(agent_service.reject_action, action_id, admin_id)
+
+        def _outcome(fut):
+            try:
+                return fut.result()
+            except Exception as e:
+                return e
+
+        out_confirm, out_reject = _outcome(f_confirm), _outcome(f_reject)
+
+    ok_outcomes = [o for o in (out_confirm, out_reject) if isinstance(o, dict)]
+    assert len(ok_outcomes) == 1, f"un seul des deux (confirm XOR reject) doit réussir : {(out_confirm, out_reject)}"
+
+    with database.get_conn() as conn:
+        final_status = conn.execute(
+            "SELECT status FROM agent_actions WHERE id = ?", (action_id,)
+        ).fetchone()["status"]
+    assert final_status in ("executed", "rejected")
