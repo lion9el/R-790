@@ -327,7 +327,9 @@ function formatNotification(n) {
   if (n.type === "message") return `💬 @${n.from} t'a envoyé un message : ${n.content} — ${when}`;
   if (n.type === "mention") return `📣 @${n.from} t'a mentionné (post #${n.post_id}) : ${n.content} — ${when}`;
   if (n.type === "comment") return `💬 @${n.from} a commenté ton post #${n.post_id} : ${n.content || ''} — ${when}`;
-  return `🔔 notification de @${n.from} — ${when}`;
+  if (n.type === "follow_request") return `🙋 @${n.from} demande à te suivre — ${when}`;
+  if (n.type === "follow_accepted") return `✅ @${n.from} a accepté ta demande — ${when}`;
+  return `🔔 ${n.type || 'notification'} de @${n.from} — ${when}`;
 }
 
 function escapeHtml(s) {
@@ -703,8 +705,10 @@ const COMMANDS = {
     if (!requireAuth()) return;
     const user = args[0];
     if (!user) return print("usage: follow <user>", "err");
-    await api("POST", `/api/follow/${user}`);
-    print(`Tu suis maintenant @${user}.`);
+    const res = await api("POST", `/api/follow/${user}`);
+    if (res.status === "requested") print(`Demande envoyée à @${user} (compte privé).`);
+    else if (res.status === "already_following") print(`Tu suis déjà @${user}.`);
+    else print(`Tu suis maintenant @${user}.`);
   },
 
   async unfollow(args) {

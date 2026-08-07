@@ -307,7 +307,7 @@ def register(body: RegisterIn):
     la création massive et automatisée de comptes.
     """
     with get_conn() as conn:
-        existing = conn.execute("SELECT id FROM users WHERE username = ?", (body.username,)).fetchone()
+        existing = conn.execute("SELECT id FROM users WHERE LOWER(username) = LOWER(?)", (body.username,)).fetchone()
         if existing:
             raise HTTPException(status_code=400, detail="Ce nom d'utilisateur existe déjà.")
         pw_hash, salt = hash_password(body.password)
@@ -335,7 +335,7 @@ def login(body: LoginIn):
     utilisateur légitime sans le bloquer trop vite.
     """
     with get_conn() as conn:
-        row = conn.execute("SELECT * FROM users WHERE username = ?", (body.username,)).fetchone()
+        row = conn.execute("SELECT * FROM users WHERE LOWER(username) = LOWER(?)", (body.username,)).fetchone()
     if not row or not verify_password(body.password, row["salt"], row["password_hash"]):
         raise HTTPException(status_code=401, detail="Identifiants incorrects.")
     token = create_token(row["id"], row["username"])
@@ -536,11 +536,16 @@ def feed(limit: int = 30, before: int | None = None, user=Depends(get_current_us
             SELECT p.* FROM posts p
             WHERE (p.user_id = ?
                OR p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?))
+              AND p.user_id NOT IN (
+                    SELECT blocked_id FROM blocks WHERE blocker_id = ?
+                    UNION
+                    SELECT blocker_id FROM blocks WHERE blocked_id = ?
+              )
               AND (? IS NULL OR p.id < ?)
             ORDER BY p.id DESC
             LIMIT ?
             """,
-            (user["id"], user["id"], before, before, limit + 1),
+            (user["id"], user["id"], user["id"], user["id"], before, before, limit + 1),
         ).fetchall()
         has_more = len(rows) > limit
         rows = rows[:limit]
@@ -722,6 +727,7 @@ def delete_post(post_id: int, user=Depends(get_current_user)):
         conn.execute("DELETE FROM likes WHERE post_id = ?", (post_id,))
         conn.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
         conn.execute("DELETE FROM notifications WHERE post_id = ?", (post_id,))
+        conn.execute("DELETE FROM bookmarks WHERE post_id = ?", (post_id,))
         _deindex_hashtags(conn, post_id)
         conn.execute("DELETE FROM posts WHERE id = ?", (post_id,))
         conn.commit()
@@ -750,19 +756,18 @@ async def add_comment(post_id: int, body: CommentIn, user=Depends(get_current_us
         post = conn.execute("SELECT id, user_id FROM posts WHERE id = ?", (post_id,)).fetchone()
         if not post:
             raise HTTPException(status_code=404, detail="Post introuvable.")
+        post_author_id = post["user_id"]
         conn.execute(
             "INSERT INTO comments (post_id, user_id, content, created_at) VALUES (?, ?, ?, ?)",
             (post_id, user["id"], body.content, now()),
         )
         conn.commit()
 
-        # Notification à l'auteur du post (sauf s'il commente son propre post)
         comment_notification = None
-        if post["user_id"] != user["id"]:
-            # On stocke un aperçu du commentaire (tronqué) pour l'affichage
+        if post_author_id != user["id"]:
             preview = body.content[:120] + ("…" if len(body.content) > 120 else "")
             comment_notification = _create_notification(
-                conn, post["user_id"], "comment", user["username"],
+                conn, post_author_id, "comment", user["username"],
                 post_id=post_id, content=preview,
             )
 
@@ -772,7 +777,7 @@ async def add_comment(post_id: int, body: CommentIn, user=Depends(get_current_us
 
     if comment_notification:
         await manager.send_to_user(
-            post["user_id"],
+            post_author_id,
             {"type": "notification", "notification": comment_notification},
         )
     for target_id, notification in mention_notifications:
@@ -842,7 +847,7 @@ async def follow_user(username: str, user=Depends(get_current_user)):
 def unfollow_user(username: str, user=Depends(get_current_user)):
     """Fait arrêter à l'utilisateur courant de suivre `username`."""
     with get_conn() as conn:
-        target = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+        target = conn.execute("SELECT id FROM users WHERE LOWER(username) = LOWER(?)", (username,)).fetchone()
         if not target:
             raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
         conn.execute(
@@ -911,7 +916,7 @@ async def send_message(body: MessageIn, user=Depends(get_current_user)):
     """
     sent_at = now()
     with get_conn() as conn:
-        target = conn.execute("SELECT id FROM users WHERE username = ?", (body.to,)).fetchone()
+        target = conn.execute("SELECT id FROM users WHERE LOWER(username) = LOWER(?)", (body.to,)).fetchone()
         if not target:
             raise HTTPException(status_code=404, detail="Destinataire introuvable.")
         if moderation_service.is_blocked(conn, user["id"], target["id"]):
@@ -941,7 +946,7 @@ def get_conversation(username: str, user=Depends(get_current_user)):
     (comme ouvrir une conversation dans une vraie messagerie).
     """
     with get_conn() as conn:
-        target = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+        target = conn.execute("SELECT id FROM users WHERE LOWER(username) = LOWER(?)", (username,)).fetchone()
         if not target:
             raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
         rows = conn.execute(
