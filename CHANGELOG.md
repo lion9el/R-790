@@ -5,6 +5,13 @@ correspond à un tag Git.
 
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/).
 
+## [Non publié] — mises à jour automatiques
+
+- Dependabot : pip, github-actions, docker (hebdo)
+- Workflow `Weekly image refresh` : rebuild no-cache + redeploy
+- `scripts/update-server.sh` : MAJ manuelle / cron sur le VPS
+- Doc dans `docs/DEPLOY.md`
+
 ## [Non publié] — Phase 3 : Postgres live (DATABASE_URL)
 
 ### Ajouté

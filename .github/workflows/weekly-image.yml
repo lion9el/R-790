@@ -1,0 +1,93 @@
+# Rebuild hebdomadaire de l'image GHCR (patches de l'image de base)
+# + redéploiement SSH si secrets configurés
+
+name: Weekly image refresh
+
+on:
+  schedule:
+    # Chaque lundi 09:00 UTC
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: weekly-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Métadonnées
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=weekly
+            type=sha,prefix=
+
+      - name: Build & push (no cache base pour récupérer les patches)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          pull: true
+          no-cache: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+
+  redeploy:
+    needs: rebuild
+    runs-on: ubuntu-latest
+    steps:
+      - name: Vérifier secrets
+        id: check
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          if [ -n "$HOST" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Pas de DEPLOY_HOST — skip redeploy"
+          fi
+
+      - name: Pull + restart sur le VPS
+        if: steps.check.outputs.enabled == 'true'
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            DEPLOY_PATH="${{ secrets.DEPLOY_PATH }}"
+            DEPLOY_PATH="${DEPLOY_PATH:-$HOME/socialnet}"
+            IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+            cd "$DEPLOY_PATH"
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            docker pull "${IMAGE}:latest"
+            docker compose up -d --remove-orphans
+            docker image prune -f
+            echo "Weekly refresh OK $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            docker compose ps

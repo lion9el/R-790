@@ -1,0 +1,73 @@
+# Mises à jour automatiques des dépendances
+# → ouvre des Pull Requests testées par CI avant merge
+
+version: 2
+updates:
+  # Backend Python (versions figées dans requirements*.txt)
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: "Africa/Lagos"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - python
+    commit-message:
+      prefix: "deps"
+      include: scope
+    # Une PR par dépendance majeure pour faciliter le review
+    groups:
+      python-minor:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: pip
+    directory: "/bots"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:15"
+      timezone: "Africa/Lagos"
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - bots
+    commit-message:
+      prefix: "deps(bots)"
+
+  # Actions GitHub (checkout, setup-python, docker/*, etc.)
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:30"
+      timezone: "Africa/Lagos"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "ci"
+      include: scope
+
+  # Image de base Dockerfile (python:3.12-slim)
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:45"
+      timezone: "Africa/Lagos"
+    open-pull-requests-limit: 2
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: "docker"

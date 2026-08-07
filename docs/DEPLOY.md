@@ -123,3 +123,63 @@ Volume Docker `socialnet-backups` recommandé.
 
 GitHub → **Packages** → `r-790` → Package settings →  
 Change visibility to **Public** si tu veux `docker pull` sans token.
+
+## Mises à jour automatiques
+
+Trois niveaux, sans intervention manuelle si les secrets sont en place :
+
+### A. Dépendances (Dependabot)
+
+Fichier : `.github/dependabot.yml`
+
+| Ecosystem | Fréquence | Effet |
+|-----------|-----------|--------|
+| `pip` (racine + bots) | chaque lundi | PR de montée de version |
+| `github-actions` | chaque lundi | PR actions CI |
+| `docker` | chaque lundi | PR image de base `python:*-slim` |
+
+Les PR passent par **Tests** + **Deploy**.  
+Tu merges → push `main` → nouvelle image + redeploy VPS.
+
+### B. Image hebdomadaire (patches OS)
+
+Workflow : `Weekly image refresh` (lundi 09:00 UTC)
+
+1. Rebuild **sans cache** de l’image Docker  
+2. Push `latest` + tag `weekly` sur GHCR  
+3. Si `DEPLOY_HOST` est défini : pull + restart sur le VPS  
+
+Déclenchement manuel : **Actions → Weekly image refresh → Run workflow**.
+
+### C. Chaque merge sur main
+
+Workflow **Deploy** : tests → build → push GHCR → SSH redeploy.
+
+### Sur le VPS (optionnel, filet de sécurité)
+
+```bash
+# une fois
+chmod +x scripts/update-server.sh
+# cron quotidien 4h
+crontab -e
+# 0 4 * * * GITHUB_TOKEN=ghp_xxx /home/deploy/socialnet/scripts/update-server.sh >> /var/log/socialnet-update.log 2>&1
+```
+
+Ou **Watchtower** (pull auto des images) :
+
+```bash
+docker run -d --name watchtower \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  containrrr/watchtower socialnet --interval 3600
+```
+
+(remplace `socialnet` par le nom du conteneur).
+
+### Résumé
+
+| Événement | Qui agit | Résultat |
+|-----------|----------|----------|
+| CVE / nouvelle version lib | Dependabot PR | CI + review + merge |
+| Patch image de base | Weekly workflow | Image + VPS à jour |
+| Ton code sur `main` | Deploy workflow | Image + VPS à jour |
+| Cron / Watchtower | VPS | Filet si Actions indispo |
