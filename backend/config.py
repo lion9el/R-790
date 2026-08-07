@@ -32,6 +32,17 @@ class Settings:
     rate_limit_login: tuple[int, int] = (10, 60)      # 10 / min
     debug: bool = False
 
+    # --- Agent IA (backend/services/agent.py) ---
+    # Comptes considérés admin dès le démarrage (en plus de is_admin en DB).
+    admin_usernames: tuple[str, ...] = ()
+    # Réutilise la même clé Groq que les bots (bots/.env.example) : un seul
+    # provider LLM à configurer pour tout le projet.
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
+    # Rate limit dédié : l'agent appelle un LLM (coût, latence) et peut
+    # proposer des actions sensibles, donc plus strict que les routes classiques.
+    rate_limit_agent: tuple[int, int] = (10, 60)      # 10 / min
+
 
 def _load_secret() -> str:
     env_secret = os.environ.get("SOCIALNET_SECRET")
@@ -54,7 +65,15 @@ def _load_secret() -> str:
     return secret
 
 
+def _load_admin_usernames() -> tuple[str, ...]:
+    raw = os.environ.get("ADMIN_USERNAMES", "")
+    return tuple(u.strip() for u in raw.split(",") if u.strip())
+
+
 settings = Settings(
     secret_key=_load_secret(),
     debug=os.environ.get("SOCIALNET_DEBUG", "").lower() in ("1", "true", "yes"),
+    admin_usernames=_load_admin_usernames(),
+    groq_api_key=os.environ.get("GROQ_API_KEY", ""),
+    groq_model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
 )

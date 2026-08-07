@@ -193,6 +193,25 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
 CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_tokens(user_id);
 
 -- Refresh tokens (sessions longue durée, révocables)
+-- Actions proposées ou exécutées par l'agent IA (backend/services/agent.py).
+-- Toute action jugée sensible (suppression, résolution de signalement...)
+-- passe par 'pending' avant exécution : jamais d'auto-exécution silencieuse.
+CREATE TABLE IF NOT EXISTS agent_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action_type TEXT NOT NULL,
+    payload TEXT NOT NULL,             -- JSON des arguments de l'action
+    reason TEXT,                       -- justification donnée par l'agent
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending | confirmed | rejected | executed | failed
+    requested_by INTEGER NOT NULL,     -- admin qui a lancé l'agent
+    reviewed_by INTEGER,               -- admin qui a confirmé/rejeté
+    result TEXT,                       -- JSON du résultat une fois exécutée
+    created_at TEXT NOT NULL,
+    reviewed_at TEXT,
+    FOREIGN KEY (requested_by) REFERENCES users(id),
+    FOREIGN KEY (reviewed_by) REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_actions_status ON agent_actions(status);
+
 CREATE TABLE IF NOT EXISTS refresh_tokens (
     jti TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL,

@@ -58,6 +58,9 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     if "is_private" not in users_columns:
         conn.execute("ALTER TABLE users ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0")
         conn.commit()
+    if "is_admin" not in users_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
 
 
 @contextmanager

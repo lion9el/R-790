@@ -17,6 +17,22 @@ def get_current_user(authorization: str = Header(default=None)) -> dict:
     return user
 
 
+def require_admin(authorization: str = Header(default=None)) -> dict:
+    """Dépendance pour les routes admin (agent IA notamment).
+
+    Même vérification que `get_current_user`, plus un contrôle du flag
+    `is_admin` en base. Volontairement une fonction séparée (pas juste une
+    vérification ad-hoc dans chaque route) pour qu'il n'existe qu'UN seul
+    endroit qui décide qui a accès aux routes sensibles.
+    """
+    user = get_current_user(authorization)
+    with get_conn() as conn:
+        row = conn.execute("SELECT is_admin FROM users WHERE id = ?", (user["id"],)).fetchone()
+        if not row or not row["is_admin"]:
+            raise HTTPException(status_code=403, detail="Réservé aux administrateurs.")
+    return user
+
+
 def _reject_if_revoked(user: dict) -> None:
     """Lève 401 si le jeton a été révoqué (individuellement ou globalement)."""
     with get_conn() as conn:

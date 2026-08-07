@@ -9,3 +9,10 @@ pyjwt==2.13.0
 python-multipart==0.0.32
 python-dotenv==1.2.2
 pillow==12.1.1
+
+# Agent IA (backend/services/agent.py) — installation optionnelle : le
+# backend démarre et fonctionne sans, seules les routes /api/agent/* 
+# répondront 503 tant que ces paquets ne sont pas installés.
+langchain==0.3.27
+langchain-openai==0.3.28
+langsmith==0.3.45

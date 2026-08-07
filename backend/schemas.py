@@ -36,6 +36,11 @@ class CommentIn(BaseModel):
     content: str = Field(min_length=1, max_length=500)
 
 
+class AgentRunIn(BaseModel):
+    """Corps attendu pour POST /api/agent/run."""
+    instruction: str = Field(min_length=1, max_length=2000)
+
+
 class MessageIn(BaseModel):
     """Corps attendu pour POST /api/messages."""
     to: str

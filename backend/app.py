@@ -48,6 +48,9 @@ from services.images import save_uploaded_image as _save_uploaded_image, UPLOAD_
 from services import account as account_service
 from services import moderation as moderation_service
 from services import backup as backup_service
+from services import agent as agent_service
+from deps import require_admin
+from schemas import AgentRunIn
 from services import ops as ops_service
 from schemas import RegisterIn, LoginIn, ProfileIn, PostEditIn, CommentIn, MessageIn
 
@@ -126,6 +129,13 @@ async def lifespan(app: FastAPI):
     with get_conn() as conn:
         for row in conn.execute("SELECT id, content FROM posts"):
             searchengine.index_add(row["id"], _normalize_for_search(row["content"]))
+    if settings.admin_usernames:
+        with get_conn() as conn:
+            for uname in settings.admin_usernames:
+                conn.execute(
+                    "UPDATE users SET is_admin = 1 WHERE username = ? COLLATE NOCASE", (uname,)
+                )
+            conn.commit()
     # Backups périodiques (DB + uploads)
     try:
         backup_service.start_background()
@@ -1196,6 +1206,39 @@ def ops_dashboard():
     """Dashboard HTML unique (auto-refresh)."""
     from fastapi.responses import HTMLResponse
     return HTMLResponse(ops_service.status_html())
+
+
+# ---------- Agent IA (admin uniquement) ----------
+# Voir backend/services/agent.py pour le principe : outils scopés, actions
+# sensibles jamais auto-exécutées (toujours 'pending' -> confirmation admin).
+
+@app.post("/api/agent/run", dependencies=[Depends(rate_limit(*settings.rate_limit_agent))])
+def agent_run(body: AgentRunIn, admin=Depends(require_admin)):
+    """Lance l'agent sur une instruction en langage naturel.
+
+    Retourne la réponse de l'agent + la liste des actions qu'il a proposées
+    (encore 'pending', rien n'a été exécuté). Utiliser /api/agent/actions/{id}/confirm
+    pour les exécuter, ou /reject pour les écarter.
+    """
+    return agent_service.run_agent(body.instruction, admin["id"])
+
+
+@app.get("/api/agent/actions")
+def agent_list_actions(status: str | None = None, limit: int = 50, admin=Depends(require_admin)):
+    """Liste les actions proposées par l'agent (filtrable par status)."""
+    return agent_service.list_actions(status=status, limit=limit)
+
+
+@app.post("/api/agent/actions/{action_id}/confirm")
+def agent_confirm_action(action_id: int, admin=Depends(require_admin)):
+    """Exécute réellement une action 'pending' proposée par l'agent."""
+    return agent_service.confirm_action(action_id, admin["id"])
+
+
+@app.post("/api/agent/actions/{action_id}/reject")
+def agent_reject_action(action_id: int, admin=Depends(require_admin)):
+    """Écarte une action 'pending' sans l'exécuter."""
+    return agent_service.reject_action(action_id, admin["id"])
 
 
 # ---------- Frontend statique (interface terminal) ----------

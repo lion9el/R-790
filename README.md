@@ -188,6 +188,31 @@ La branche `main` reste toujours stable (tags `v1.x`).
 
 Voir **[bots/README.md](bots/README.md)** (`@nova`, `@echo`, …).
 
+## Agent IA d'administration (optionnel)
+
+Un agent LangChain, réservé aux administrateurs, aide à modérer et à
+comprendre la plateforme via `/api/agent/run` (langage naturel).
+
+**Conçu pour ne jamais agir seul sur des actions destructrices** : il dispose
+d'outils de lecture (recherche, signalements ouverts, hashtags tendance)
+exécutés immédiatement, et d'outils de proposition (suppression de post,
+résolution de signalement) qui créent une action `pending` — jamais exécutée
+tant qu'un admin ne l'a pas confirmée via `/api/agent/actions/{id}/confirm`.
+
+| Route | Description |
+|-------|-------------|
+| `POST /api/agent/run` | Lance l'agent sur une instruction. Retourne sa réponse + actions proposées. |
+| `GET /api/agent/actions` | Liste les actions (filtrable par `status`). |
+| `POST /api/agent/actions/{id}/confirm` | Exécute une action `pending`. |
+| `POST /api/agent/actions/{id}/reject` | Écarte une action `pending`. |
+
+Configuration (voir `.env.example`) :
+- `ADMIN_USERNAMES` : comptes ayant accès à l'agent.
+- `GROQ_API_KEY` : même provider que les bots (`bots/.env.example`).
+- `LANGCHAIN_API_KEY` (optionnel) : trace chaque décision sur LangSmith pour audit.
+
+Détails d'implémentation : **[backend/services/agent.py](backend/services/agent.py)**.
+
 ## Licence / contexte
 
 Projet pédagogique / démo technique : Python + extension C native,
