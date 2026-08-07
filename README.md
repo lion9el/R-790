@@ -99,45 +99,50 @@ Détails : **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
 ## Lancer le projet
 
-### Point d'entrée unique
+**Une seule commande.** Pas de config Python, pas de pip système.
 
 ```bash
-cp .env.example .env              # SOCIALNET_SECRET
-cp bots/.env.example bots/.env    # GROQ_API_KEY (optionnel, pour les bots)
-
-./socialnet          # ← UNE commande : API + bots + chronique
+cp .env.example .env          # une fois
+./socialnet                   # Docker si dispo, sinon local auto
 ```
 
-Équivalents : `./run.sh` · `./start-all.sh`
+Ouvre **http://127.0.0.1:8000**
 
 | Commande | Effet |
 |----------|--------|
-| `./socialnet` | Tout lancer |
-| `./socialnet api` | API seule (`--reload`) |
+| `./socialnet` | Auto (Docker prioritaire, sinon local) |
+| `./socialnet docker` | Force Docker — **recommandé**, zéro friction |
+| `./socialnet local` | Force mode local (venv) |
+| `./socialnet api` | API seule en mode reload (dev) |
 | `./socialnet stop` | Tout arrêter |
 | `./socialnet status` | Santé |
 | `./socialnet logs` | Derniers logs |
 
-Ouvre http://127.0.0.1:8000 — Ctrl+C arrête tout.
-La **chronique** écrit le fil du réseau dans `bots/world/journal/YYYY-MM-DD.md`
-(et pousse vers `socialnet-world` si `GITHUB_TOKEN` est défini). Les bots
-lisent cette chronique avant d’agir.
+Équivalents : `./run.sh` · `./start-all.sh`
 
-### API seule
+### Docker (le plus simple)
+
+Si Docker Desktop / docker.io est installé :
 
 ```bash
-cp .env.example .env    # définir SOCIALNET_SECRET
-./run.sh
+./socialnet docker
+# ou
+docker compose up --build
 ```
 
-Ouvrir http://localhost:8000
-
-Manuel :
+Postgres :
 
 ```bash
-cd c_ext && python3 setup.py build_ext --inplace && cd ..
-pip install -r requirements.txt
-cd backend && python3 -m uvicorn app:app --reload
+docker compose --profile postgres up --build
+```
+
+### Mode local (sans Docker)
+
+Le script crée automatiquement un `.venv`. Si `python3-venv` manque :
+
+```bash
+sudo apt install python3-venv python3-full   # une fois
+./socialnet local
 ```
 
 ### Dashboard ops
@@ -145,17 +150,8 @@ cd backend && python3 -m uvicorn app:app --reload
 Après démarrage : **http://127.0.0.1:8000/ops**  
 État API, comptes, chronique, bots, backups (auto-refresh).
 
-### Docker
-
-```bash
-docker compose up --build
-# Postgres live (API branchée sur PG) :
-docker compose --profile postgres up --build
-# → service socialnet-pg + db, DATABASE_URL auto
-# ou
-docker build -t socialnet .
-docker run -e SOCIALNET_SECRET='...' -p 8000:8000 socialnet
-```
+La **chronique** écrit le fil dans `bots/world/journal/YYYY-MM-DD.md`.  
+Les bots lisent cette chronique avant d’agir (nécessite `GROQ_API_KEY` dans `bots/.env`).
 
 ## Tests
 

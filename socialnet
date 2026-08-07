@@ -2,12 +2,14 @@
 # =============================================================================
 # SocialNet — point d'entrée UNIQUE
 # =============================================================================
-#   ./socialnet          → lance TOUT (API + bots + chronique)
+#   ./socialnet          → lance TOUT (Docker si dispo, sinon local)
 #   ./socialnet up       → idem
-#   ./socialnet api      → API seule (dev, --reload)
-#   ./socialnet stop     → arrête les process lancés par ce script
-#   ./socialnet status   → santé rapide
-#   ./socialnet logs     → queue des logs
+#   ./socialnet api      → API seule locale (--reload)
+#   ./socialnet docker   → force Docker
+#   ./socialnet local    → force mode local (venv)
+#   ./socialnet stop     → arrête
+#   ./socialnet status   → santé
+#   ./socialnet logs     → logs
 # =============================================================================
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,8 +24,8 @@ API_LOG="${ROOT}/.run-api.log"
 BOTS_LOG="${ROOT}/.run-bots.log"
 API_PID_FILE="${PID_DIR}/api.pid"
 BOTS_PID_FILE="${PID_DIR}/bots.pid"
+MODE_FILE="${PID_DIR}/mode"
 
-# Python / pip du venv (définis après _ensure_venv)
 PYTHON="python3"
 PIP="pip"
 
@@ -40,6 +42,20 @@ fi
 cmd="${1:-up}"
 
 _die() { echo "✗ $*" >&2; exit 1; }
+
+_has_docker() {
+  command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+}
+
+_compose() {
+  if docker compose version >/dev/null 2>&1; then
+    docker compose "$@"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    docker-compose "$@"
+  else
+    return 1
+  fi
+}
 
 _cleanup_children() {
   local pid
@@ -59,37 +75,96 @@ _ensure_env() {
   if [[ ! -f "$ROOT/.env" && -f "$ROOT/.env.example" ]]; then
     echo "→ Création de .env depuis .env.example"
     cp "$ROOT/.env.example" "$ROOT/.env"
-    echo "  Édite .env et définis SOCIALNET_SECRET avant la prod."
+    echo "  (Édite .env et définis SOCIALNET_SECRET avant la prod)"
   fi
   if [[ ! -f "$ROOT/bots/.env" && -f "$ROOT/bots/.env.example" ]]; then
     cp "$ROOT/bots/.env.example" "$ROOT/bots/.env"
-    echo "→ bots/.env créé (ajoute GROQ_API_KEY pour activer les bots)"
   fi
 }
 
-_ensure_venv() {
-  # Virtualenv local pour éviter PEP 668 (externally-managed-environment)
-  if [[ ! -d "$VENV_DIR" || ! -x "$VENV_DIR/bin/python" ]]; then
-    echo "→ Création du virtualenv (.venv)…"
-    python3 -m venv "$VENV_DIR" \
-      || _die "Impossible de créer le venv — installe python3-venv / python3-full"
+# ─── Mode Docker (recommandé : zéro friction) ───────────────────────────────
+
+cmd_docker() {
+  _ensure_env
+  if ! _has_docker; then
+    _die "Docker non disponible. Installe Docker Desktop (ou docker.io) puis relance."
   fi
+  if ! _compose version >/dev/null 2>&1; then
+    _die "docker compose introuvable."
+  fi
+  echo "→ Mode Docker"
+  echo "docker" >"$MODE_FILE"
+  echo "→ Build + démarrage…"
+  _compose up --build -d
+  echo -n "→ Attente API"
+  local i
+  for i in $(seq 1 60); do
+    if curl -sf "$URL/" >/dev/null 2>&1; then
+      echo " OK"
+      echo ""
+      echo "╔══════════════════════════════════════════╗"
+      echo "║  SocialNet prêt (Docker)                 ║"
+      echo "║  Terminal  : $URL"
+      echo "║  Ops       : $URL/ops"
+      echo "║  Arrêt     : ./socialnet stop            ║"
+      echo "║  Logs      : ./socialnet logs            ║"
+      echo "╚══════════════════════════════════════════╝"
+      echo ""
+      return 0
+    fi
+    echo -n "."
+    sleep 1
+  done
+  echo ""
+  _compose logs --tail 40
+  _die "API non joignable — voir les logs ci-dessus"
+}
+
+# ─── Mode local (venv) ──────────────────────────────────────────────────────
+
+_ensure_venv() {
+  if [[ -d "$VENV_DIR" && -x "$VENV_DIR/bin/python" ]]; then
+    PYTHON="$VENV_DIR/bin/python"
+    PIP="$VENV_DIR/bin/pip"
+    return 0
+  fi
+
+  echo "→ Création du virtualenv (.venv)…"
+  if python3 -m venv "$VENV_DIR" 2>/dev/null; then
+    :
+  elif python3 -m venv "$VENV_DIR" --without-pip 2>/dev/null; then
+    echo "  (bootstrap pip…)"
+    curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV_DIR/bin/python" -q
+  else
+    echo ""
+    echo "✗ Impossible de créer un virtualenv."
+    echo ""
+    echo "  Solutions (une seule suffit) :"
+    echo "  1. Docker (recommandé, zéro dépendance Python) :"
+    echo "       ./socialnet docker"
+    echo "  2. Installer le paquet manquant :"
+    echo "       sudo apt install python3-venv python3-full"
+    echo "  3. Ou : python3 -m pip install --user virtualenv"
+    echo "       puis : python3 -m virtualenv .venv && ./socialnet local"
+    echo ""
+    exit 1
+  fi
+
   PYTHON="$VENV_DIR/bin/python"
   PIP="$VENV_DIR/bin/pip"
-  # S'assurer que pip est à jour dans le venv
   "$PIP" install -q --upgrade pip setuptools wheel >/dev/null 2>&1 || true
 }
 
 _build_c() {
   echo "→ Extension C…"
   (cd "$ROOT/c_ext" && "$PYTHON" setup.py build_ext --inplace) >>"$API_LOG" 2>&1 \
-    || _die "Échec compilation C — voir $API_LOG"
+    || _die "Échec compilation C — voir $API_LOG (installe build-essential + python3-dev)"
 }
 
 _install_deps() {
   echo "→ Dépendances Python…"
   "$PIP" install -q -r "$ROOT/requirements.txt" \
-    || _die "Échec installation des dépendances — voir $API_LOG"
+    || _die "Échec installation des dépendances"
   if [[ -f "$ROOT/bots/requirements-bots.txt" ]]; then
     "$PIP" install -q -r "$ROOT/bots/requirements-bots.txt" 2>/dev/null || true
   fi
@@ -144,10 +219,11 @@ _chronicle_once() {
   fi
 }
 
-cmd_up() {
+cmd_local() {
   trap '_cleanup_children; echo; echo "Arrêté."; exit 0' INT TERM
   : >"$API_LOG"
   : >"$BOTS_LOG"
+  echo "local" >"$MODE_FILE"
   _ensure_env
   _ensure_venv
   _build_c
@@ -159,7 +235,7 @@ cmd_up() {
 
   echo ""
   echo "╔══════════════════════════════════════════╗"
-  echo "║  SocialNet prêt                          ║"
+  echo "║  SocialNet prêt (local)                  ║"
   echo "║  Terminal  : $URL"
   echo "║  Ops       : $URL/ops"
   echo "║  Logs API  : $API_LOG"
@@ -168,7 +244,6 @@ cmd_up() {
   echo "╚══════════════════════════════════════════╝"
   echo ""
 
-  # Rester au premier plan tant que l'API vit
   local api_pid
   api_pid="$(cat "$API_PID_FILE")"
   while kill -0 "$api_pid" 2>/dev/null; do
@@ -178,12 +253,24 @@ cmd_up() {
   _cleanup_children
 }
 
+# ─── up = auto (Docker si possible, sinon local) ────────────────────────────
+
+cmd_up() {
+  if _has_docker && _compose version >/dev/null 2>&1; then
+    cmd_docker
+  else
+    echo "→ Docker indisponible — mode local"
+    cmd_local
+  fi
+}
+
 cmd_api() {
   _ensure_env
   _ensure_venv
   _build_c
   _install_deps
   echo "→ API seule (reload) $URL"
+  echo "local" >"$MODE_FILE"
   cd "$ROOT/backend"
   export PYTHONPATH="${ROOT}/backend:${ROOT}/c_ext${PYTHONPATH:+:$PYTHONPATH}"
   exec "$PYTHON" -m uvicorn app:app --host "$HOST" --port "$PORT" --reload
@@ -191,11 +278,16 @@ cmd_api() {
 
 cmd_stop() {
   echo "→ Arrêt…"
+  local mode
+  mode="$(cat "$MODE_FILE" 2>/dev/null || echo "")"
+  if [[ "$mode" == "docker" ]] || _has_docker; then
+    _compose down 2>/dev/null || true
+  fi
   _cleanup_children
-  # process orphelins éventuels sur le port
   if command -v fuser >/dev/null 2>&1; then
     fuser -k "${PORT}/tcp" 2>/dev/null || true
   fi
+  rm -f "$MODE_FILE"
   echo "OK"
 }
 
@@ -204,34 +296,49 @@ cmd_status() {
   if curl -sf "$URL/api/ops/status" 2>/dev/null | python3 -m json.tool 2>/dev/null; then
     :
   elif curl -sf "$URL/" >/dev/null 2>&1; then
-    echo "API répond sur $URL (ops JSON indisponible)"
+    echo "API répond sur $URL"
   else
     echo "API down ($URL)"
   fi
-  [[ -f "$API_PID_FILE" ]] && echo "API pid  : $(cat "$API_PID_FILE")"
-  [[ -f "$BOTS_PID_FILE" ]] && echo "Bots pid : $(cat "$BOTS_PID_FILE")"
+  [[ -f "$MODE_FILE" ]] && echo "Mode    : $(cat "$MODE_FILE")"
+  [[ -f "$API_PID_FILE" ]] && echo "API pid : $(cat "$API_PID_FILE")"
+  [[ -f "$BOTS_PID_FILE" ]] && echo "Bots pid: $(cat "$BOTS_PID_FILE")"
+  if _has_docker; then
+    _compose ps 2>/dev/null || true
+  fi
 }
 
 cmd_logs() {
-  echo "=== API (fin) ==="
-  tail -n 40 "$API_LOG" 2>/dev/null || echo "(pas de log)"
-  echo "=== BOTS (fin) ==="
-  tail -n 40 "$BOTS_LOG" 2>/dev/null || echo "(pas de log)"
+  local mode
+  mode="$(cat "$MODE_FILE" 2>/dev/null || echo "")"
+  if [[ "$mode" == "docker" ]]; then
+    _compose logs --tail 50
+  else
+    echo "=== API (fin) ==="
+    tail -n 40 "$API_LOG" 2>/dev/null || echo "(pas de log)"
+    echo "=== BOTS (fin) ==="
+    tail -n 40 "$BOTS_LOG" 2>/dev/null || echo "(pas de log)"
+  fi
 }
 
 case "$cmd" in
   up|start|all) cmd_up ;;
+  docker)       cmd_docker ;;
+  local)        cmd_local ;;
   api|dev)      cmd_api ;;
   stop)         cmd_stop ;;
   status)       cmd_status ;;
   logs)         cmd_logs ;;
   help|-h|--help)
-    echo "Usage: ./socialnet [up|api|stop|status|logs]"
-    echo "  up (défaut)  Lance API + chronique + bots"
-    echo "  api          API seule avec --reload"
-    echo "  stop         Arrête les process"
+    echo "Usage: ./socialnet [up|docker|local|api|stop|status|logs]"
+    echo ""
+    echo "  up (défaut)  Docker si dispo, sinon local — UNE commande"
+    echo "  docker       Force Docker (recommandé, zéro friction)"
+    echo "  local        Force mode local (venv)"
+    echo "  api          API seule avec --reload (dev)"
+    echo "  stop         Arrête tout"
     echo "  status       Santé"
-    echo "  logs         Dernières lignes de logs"
+    echo "  logs         Derniers logs"
     ;;
   *)
     _die "Commande inconnue: $cmd (essaie ./socialnet help)"
