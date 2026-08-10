@@ -3,7 +3,7 @@
 # Run:   docker run -e SOCIALNET_SECRET=... -p 8000:8000 socialnet
 
 # ---------- Stage 1: build extension C + deps ----------
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc \
@@ -22,7 +22,7 @@ COPY c_ext/ ./c_ext/
 RUN cd c_ext && python setup.py build_ext --inplace     && ls -la searchengine*.so
 
 # ---------- Stage 2: runtime minimal ----------
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libjpeg62-turbo \
