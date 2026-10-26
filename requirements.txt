@@ -1,9 +1,9 @@
 # Dépendances cœur (SQLite par défaut — suffit pour lancer)
-fastapi==0.140.0
-uvicorn[standard]==0.51.0
-pyjwt==2.13.0
+fastapi==0.161.1
+uvicorn[standard]==0.54.0
+pyjwt==2.15.1
 python-multipart==0.0.32
-python-dotenv==1.2.2
+python-dotenv==1.2.4
 pillow==12.1.1
 
 # Optionnel Postgres : installé séparément si disponible
